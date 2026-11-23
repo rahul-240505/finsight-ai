@@ -1,0 +1,41 @@
+[project]
+name = "finsight-backend"
+version = "0.1.0"
+description = "FinSight AI API: local financial-risk investigation demo"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic-settings>=2.6",
+    "psycopg[binary]>=3.2",
+    "redis>=5.2",
+    "httpx>=0.28",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.8",
+]
+
+[tool.uv]
+package = false   # an application, not a library to publish
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# E/F: errors · I: import order · B: bug-prone patterns · UP: modern syntax · S: security
+select = ["E", "F", "I", "B", "UP", "S"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]   # assert is how pytest works
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+    "integration: needs real Postgres/Redis/Qdrant (Docker Compose or CI services)",
+    "ollama: needs a local Ollama server; skipped in CI",
+]

@@ -1,0 +1,34 @@
+"""Application settings, loaded once from environment variables and the repo-root .env."""
+
+from functools import lru_cache
+from pathlib import Path
+from typing import Literal
+
+from pydantic import Field, SecretStr
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# config.py -> core -> app -> backend -> repo root
+REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+class Settings(BaseSettings):
+    """Typed config. Real env vars override values from .env."""
+
+    model_config = SettingsConfigDict(
+        env_file=REPO_ROOT / ".env",
+        extra="ignore",  # .env also holds POSTGRES_* vars meant for Docker Compose
+    )
+
+    app_env: Literal["local", "test", "ci"] = "local"
+    # Required: no default, so a missing value fails at startup, not on the first query.
+    database_url: SecretStr
+    redis_url: str = "redis://localhost:6379/0"
+    qdrant_url: str = "http://localhost:6333"
+    ollama_base_url: str = "http://localhost:11434"
+    ready_timeout_seconds: float = Field(default=2.0, gt=0, le=10)
+
+
+@lru_cache
+def get_settings() -> Settings:
+    """Parse settings once per process; tests call get_settings.cache_clear() to reload."""
+    return Settings()

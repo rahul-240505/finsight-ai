@@ -103,14 +103,14 @@ Layering rule: **router → service → repository/DB**. Routers parse input and
 1. Explain what we're building and why, the main concepts, alternatives and trade-offs. Plain language, analogy where helpful.
 2. Point to the matching sections of `docs/STUDY_GUIDE.md` Part B for me to read.
 3. Give a numbered step plan (5–10 steps). **Wait for my OK.**
-4. Create a branch: `phase-N-short-name`.
+4. Work directly on `main` (no phase branches).
 
 ### 8.2 Each step
 1. Say what you'll do and why (2–4 lines).
 2. Make the change (boilerplate: write it; core logic: see 8.3).
 3. Run it: tests, lint, or the command. Show me the real output (trimmed).
 4. Explain any non-obvious line.
-5. Give me the commit command(s) (see §11). A step is not done until tests pass.
+5. No commit per step. A step is not done until tests pass.
 
 ### 8.3 Core logic — I write it, you review
 For these areas give me a **skeleton with `TODO(rahul)` comments and hints**, not the full solution:
@@ -137,7 +137,7 @@ Boilerplate you write directly: config, Compose, CI, Alembic setup, Pydantic sch
 5. **Update the documents** per §9.
 6. **Print a "Study Hub update"** (see §9.3).
 7. Update §15 of this file.
-8. Give me the commit, push and merge commands. Then **STOP** until I type `next`.
+8. Give me **one** `git add` + `git commit` + `git push` command block for the whole phase/module. Then **STOP** until I type `next`.
 
 ## 9. Documents to maintain
 
@@ -211,9 +211,9 @@ Keep each block self-contained and under ~80 lines.
 - **No `Co-Authored-By: Claude` or any AI attribution trailer** in commit messages or PRs. Claude must not appear as a contributor.
 - Claude may run read-only git commands (`git status`, `git diff`, `git log`) to check the state.
 
-- Branch per phase: `phase-0-foundation`, `phase-1-auth`, … Never work directly on `main`.
-- Commit small and often. Conventional style: `feat(auth): add argon2id password hashing`, `test(rag): add owner isolation test`, `docs(study): phase 2 chapter`.
-- Run `ruff` and `pytest` before each commit.
+- **`main` branch only.** No phase branches.
+- **One commit + push per completed phase/module**, made by me. Conventional style: `feat(auth): add argon2id password hashing`, `test(rag): add owner isolation test`, `docs(study): phase 2 chapter`.
+- Claude runs `ruff` and `pytest` before handing me the commit command.
 - `.gitignore` must cover: `.env`, `*.env.local`, `data/`, `uploads/`, `ml/artifacts/`, `*.joblib`, `*.pkl`, `*.parquet`, `*.csv` (except `tests/fixtures/*.csv`), `node_modules/`, `.venv/`, `__pycache__/`, `.pytest_cache/`, `.ruff_cache/`.
 - Before every commit, check `git status` for anything secret or large. If unsure, ask me.
 
@@ -259,7 +259,7 @@ Timings: warm cache, at least 3 runs, report median (and p95 if many runs).
 ## 15. Current status (update at every phase end)
 
 - Current phase: **Not started** (next: Phase 0)
-- Branch: —
+- Branch: `main` only
 - Last completed step: —
 - Open questions / blockers: hardware and installed-tools check (§16 step 2)
 - Measured results so far: none
