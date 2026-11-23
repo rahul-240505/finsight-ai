@@ -1,0 +1,35 @@
+# Secrets
+.env
+*.env.local
+
+# Data, uploads, model files (never commit)
+data/
+uploads/
+ml/artifacts/
+*.joblib
+*.pkl
+*.parquet
+*.csv
+!backend/tests/fixtures/*.csv
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+
+# Notebooks: commit code, not output data
+.ipynb_checkpoints/
+
+# Frontend
+node_modules/
+frontend/dist/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
