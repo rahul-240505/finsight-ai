@@ -16,6 +16,7 @@ from sqlalchemy import (
     Integer,
     Numeric,
     String,
+    Text,
     UniqueConstraint,
     text,
 )
@@ -183,3 +184,52 @@ class RiskAssessment(TimestampMixin, Base):
     risk_score: Mapped[float] = mapped_column(Float)
     is_flagged: Mapped[bool] = mapped_column(Boolean)
     reasons: Mapped[list[str]] = mapped_column(JSONB)
+
+
+class Document(TimestampMixin, Base):
+    """An uploaded PDF. Its text lives in document_chunks; Qdrant holds only the vectors."""
+
+    __tablename__ = "documents"
+    __table_args__ = (
+        UniqueConstraint("id", "owner_id", name="uq_documents_id_owner"),
+        # The same file is indexed once per user; re-uploading returns the existing document.
+        UniqueConstraint("owner_id", "content_hash", name="uq_documents_owner_content"),
+        CheckConstraint("status IN ('indexing', 'ready')", name="status_valid"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    filename: Mapped[str] = mapped_column(String(255))
+    content_hash: Mapped[str] = mapped_column(String(64))
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    page_count: Mapped[int] = mapped_column(Integer)
+    chunk_count: Mapped[int] = mapped_column(Integer)
+    # "indexing" until the vectors are stored; only "ready" documents are searched.
+    status: Mapped[str] = mapped_column(String(20), server_default="indexing")
+    # What produced the vectors, so a model or chunker change can find what to re-index.
+    embedding_model: Mapped[str] = mapped_column(String(100))
+    chunker_version: Mapped[str] = mapped_column(String(20))
+
+
+class DocumentChunk(Base):
+    """A passage from one page. Its id is also its Qdrant point id."""
+
+    __tablename__ = "document_chunks"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["document_id", "owner_id"],
+            ["documents.id", "documents.owner_id"],
+            ondelete="CASCADE",
+            name="fk_document_chunks_document_owner",
+        ),
+        UniqueConstraint("document_id", "chunk_index", name="uq_document_chunks_doc_index"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    document_id: Mapped[uuid.UUID] = mapped_column()
+    owner_id: Mapped[uuid.UUID] = mapped_column()
+    chunk_index: Mapped[int] = mapped_column(Integer)
+    page: Mapped[int] = mapped_column(Integer)  # 1-based, as people cite pages
+    text: Mapped[str] = mapped_column(Text)

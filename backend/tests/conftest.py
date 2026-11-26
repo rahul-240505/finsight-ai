@@ -5,10 +5,12 @@ Unit tests use `client` (no database). Integration tests use `api` + `db`: a sep
 rolled back afterwards, so tests never see each other's data.
 """
 
+import contextlib
 import uuid
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
+import httpx
 import psycopg
 import pytest
 from alembic import command
@@ -24,10 +26,29 @@ from app.db.models import User
 from app.db.session import get_db
 from app.main import create_app
 from app.modules.auth import service as auth_service
+from app.services.llm import FakeProvider, get_llm
+from app.services.vector_store import QdrantStore, VectorStoreUnavailable, get_vector_store
 
 ALEMBIC_INI = Path(__file__).resolve().parents[1] / "alembic.ini"
 PASSWORD = "correct-horse-battery"  # test-only, meets the 12-character policy
 BASE_URL = "https://testserver"  # https, so the Secure session cookie is sent back
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Tests marked `ollama` need a local model server: skip them in CI and when it's down."""
+    settings = get_settings()
+    reason = None
+    if settings.app_env == "ci":
+        reason = "no Ollama in CI"
+    else:
+        try:
+            httpx.get(f"{settings.ollama_base_url}/api/tags", timeout=1.0).raise_for_status()
+        except httpx.HTTPError:
+            reason = "Ollama is not running"
+    if reason:
+        for item in items:
+            if "ollama" in item.keywords:
+                item.add_marker(pytest.mark.skip(reason=reason))
 
 
 @pytest.fixture
@@ -77,11 +98,37 @@ def db(test_engine: Engine) -> Iterator[Session]:
             outer.rollback()
 
 
+@pytest.fixture(scope="session")
+def vector_store() -> Iterator[QdrantStore]:
+    """A throwaway Qdrant collection for this test run (Qdrant has no rollback, so tests stay
+    apart by using fresh users; the collection is dropped at the end)."""
+    store = QdrantStore(get_settings(), collection=f"test_chunks_{uuid.uuid4().hex[:8]}")
+    yield store
+    with contextlib.suppress(VectorStoreUnavailable):
+        store.drop_collection()
+
+
 @pytest.fixture
-def api(db: Session) -> Iterator[TestClient]:
-    """TestClient whose requests all use the test's `db` session."""
+def fake_llm() -> FakeProvider:
+    return FakeProvider(dim=get_settings().embed_dim)
+
+
+@pytest.fixture
+def api(
+    db: Session,
+    fake_llm: FakeProvider,
+    vector_store: QdrantStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[TestClient]:
+    """TestClient whose requests use the test's `db` session, the fake model (no test can
+    reach Ollama by accident) and the test Qdrant collection."""
+    # Hashed bag-of-words similarities run lower than real embeddings: a question sharing a
+    # few words with a passage scores about 0.2-0.4, an unrelated one about 0.
+    monkeypatch.setattr(get_settings(), "rag_min_score", 0.1)
     app = create_app()
     app.dependency_overrides[get_db] = lambda: db
+    app.dependency_overrides[get_llm] = lambda: fake_llm
+    app.dependency_overrides[get_vector_store] = lambda: vector_store
     with TestClient(app, base_url=BASE_URL) as c:
         yield c
 
@@ -122,4 +169,13 @@ def upload(client: TestClient, csv_text: str, name: str = "test", key: str | Non
     headers = {"Content-Type": "text/csv", "Idempotency-Key": key or str(uuid.uuid4())}
     return client.post(
         "/api/v1/datasets", params={"name": name}, content=csv_text.encode(), headers=headers
+    )
+
+
+def upload_pdf(client: TestClient, pdf: bytes, name: str = "policy.pdf"):
+    return client.post(
+        "/api/v1/documents",
+        params={"name": name},
+        content=pdf,
+        headers={"Content-Type": "application/pdf"},
     )

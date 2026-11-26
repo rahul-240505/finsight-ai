@@ -1,5 +1,6 @@
 """Authorization: every route needs a login, roles limit actions, owners limit objects (IDOR)."""
 
+import re
 from collections.abc import Callable
 
 import pytest
@@ -29,14 +30,12 @@ PRIVATE_ROUTES = [r for r in api_routes() if r not in PUBLIC_ROUTES]
 def test_route_inventory_is_not_empty() -> None:
     """Guards the parametrized test below: an empty list would make it silently skip."""
     assert PUBLIC_ROUTES <= set(api_routes())
-    assert len(PRIVATE_ROUTES) >= 11
+    assert len(PRIVATE_ROUTES) >= 16
 
 
 @pytest.mark.parametrize(("method", "path"), PRIVATE_ROUTES)
 def test_every_private_route_needs_login(api: TestClient, method: str, path: str) -> None:
-    url = path
-    for param in ("{dataset_id}", "{user_id}", "{transaction_id}"):
-        url = url.replace(param, SAMPLE_ID)
+    url = re.sub(r"\{[a-z_]+\}", SAMPLE_ID, path)
     response = api.request(method, url, json={})
     assert response.status_code == 401, f"{method} {path} -> {response.status_code}"
 

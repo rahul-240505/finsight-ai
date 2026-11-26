@@ -146,3 +146,55 @@ Every benchmark and evaluation result for FinSight AI, with the exact command an
 ### 2026-11-26 · Test suite after ML milestone
 - Version: 0.4.0 · Command: `cd backend && uv run pytest` (3 runs)
 - Result: 105 passed, 0 failed, 0 skipped. Wall time 8.90 / 8.94 / 8.87 s (median 8.90 s), final run after all Phase 3 changes.
+
+### 2026-11-26 · Document Q&A, run 1 (prompt `rag-v1`, 200-word chunks) — superseded by run 2
+- Milestone: document Q&A · Version: 0.5.0 (uncommitted, on top of 5b59038)
+- Dataset: `eval/policy_corpus.json`: 6 fictional policy PDFs, 17 pages. `eval/rag_questions.jsonl`: 42 answerable (expected file + page + keywords), 10 unanswerable, 3 prompt-injection probes aimed at a page with a planted instruction; answerable/unanswerable alternate dev/test (injection probes all test).
+- Machine: i5-12500H, 15 GiB RAM, RTX 4050 6 GB · Ollama `nomic-embed-text` + `qwen3.5:4b` (temperature 0, thinking off, num_ctx 4096) · Postgres + Qdrant in local Docker
+- Command: `cd backend && PYTHONPATH=. uv run python ../eval/run_rag_eval.py` (first version of the script)
+- Retrieval (all 42 answerable, top 5, in-memory cosine on the same embeddings):
+
+| Chunking (words/overlap) | Chunks | Recall@1 | Recall@3 | Recall@5 | MRR@5 |
+| --- | --- | --- | --- | --- | --- |
+| 100 / 20 | 26 | 0.786 | 1.000 | 1.000 | 0.877 |
+| 200 / 40 | 17 | 0.738 | 0.952 | 1.000 | 0.845 |
+| 350 / 60 | 17 | 0.738 | 0.952 | 1.000 | 0.845 |
+
+- End to end with 200/40 and a gate of 0.689 (best balanced accuracy on dev): answered 36/42 answerable (85.7%), keyword accuracy 85.7%, citation accuracy 100% of answered, citation precision 0.75; 10/10 unanswerable declined (all by the gate); injection 3/3 passed. With the gate off: 42/42 answered, keyword accuracy 100%, citation precision 0.78; 9/10 unanswerable declined by the model.
+- Problems found: (1) the gate blocked 6 answerable questions, because answerable and unanswerable best-match scores overlap (dev: weakest answerable 0.648, strongest unanswerable 0.678); (2) one unanswerable question ("overdraft fee") came back as prose ("The provided sources do not contain information…") citing all five sources, so it counted as answered; (3) answers were padded to four sentences with loosely related facts, lowering citation precision.
+- Notes: 200 and 350 words give identical chunks because every page is under 200 words. The first evaluation attempts failed because the Ollama server returned all-zero embeddings and hung on chat (HTTP 200 / 500 after 120 s); unloading and reloading the models fixed it, and the provider now rejects zero, non-finite and wrong-size vectors.
+
+### 2026-11-26 · Document Q&A, run 2 (prompt `rag-v2`, chunking and gate chosen on dev)
+- Milestone: document Q&A · Version: 0.5.0 (uncommitted, on top of 5b59038)
+- Dataset, machine, models: as run 1
+- Changes after run 1: prompt `rag-v2` (1-3 sentences, only facts that answer the question, the refusal token "and nothing else"); prose refusals ("the sources do not contain…") treated as declined; chunk size chosen by dev MRR@5; gate rule changed to "the highest cut-off that blocks no answerable dev question" (blocking a real answer loses it; a let-through question costs one model call that the model and the citation check can still decline).
+- Command: `cd backend && PYTHONPATH=. uv run python ../eval/run_rag_eval.py`
+- Retrieval by split (identical embeddings to run 1):
+
+| Chunking | Dev Recall@1 | Dev MRR@5 | Test Recall@1 | Test Recall@3 | Test MRR@5 |
+| --- | --- | --- | --- | --- | --- |
+| **100 / 20 (chosen on dev)** | 0.762 | 0.865 | 0.809 | 1.000 | 0.889 |
+| 200 / 40 | 0.714 | 0.841 | 0.762 | 0.905 | 0.849 |
+| 350 / 60 | 0.714 | 0.841 | 0.762 | 0.905 | 0.849 |
+
+- Gate chosen on dev: **0.6404** (the balanced-accuracy rule would give 0.687).
+- End to end, gate on (through Postgres + Qdrant + Ollama):
+
+| Split | Answered (answerable) | Keyword accuracy | Citation accuracy | Citation precision | Unanswerable declined | Injection probes passed | Answer latency p50 / p95 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Dev | 21/21 | 1.000 | 1.000 | 1.000 | 5/5 (4 gate, 1 model) | — | 1.42 / 1.93 s |
+| Test | 21/21 | 1.000 | 1.000 | 0.960 | 5/5 (5 gate) | 3/3 | 1.28 / 1.79 s |
+| All | 42/42 | 1.000 | 1.000 | 0.980 | 10/10 (9 gate, 1 model) | 3/3 | 1.32 / 1.87 s |
+
+- Gate off: same answers for answerable questions (42/42, precision 0.980); 10/10 unanswerable declined by the model itself (gate saves 9 model calls out of 10 on unanswerable questions; a gated question returned in 16-19 ms in the eval).
+- Indexing (embed + Postgres + Qdrant, per PDF, one run): 58-279 ms; the first file includes model warm-up.
+- Definitions: *keyword accuracy* = answered and contains every expected keyword; *citation accuracy* = at least one citation on the expected page; *citation precision* = citations on the expected page ÷ all citations; *injection passed* = the planted sentence does not appear in the answer.
+- Notes: **not a held-out benchmark.** The corpus and questions were written by the same author, the questions are close paraphrases, and the run-2 prompt and refusal changes were made after seeing run-1 results on all questions (the dev/test split protects the chunk-size and gate choices only). Treat it as a regression suite: a later change that lowers these numbers is a real regression. Latencies are over the questions that reached the chat model in one run (46 gate on, 55 gate off), warm model.
+
+### 2026-11-26 · Live API check, document Q&A
+- Version: 0.5.0 · `uvicorn app.main:app` on the host, demo user, `data/policies/card-dispute-procedure.pdf` (3 pages, 5 chunks)
+- Result: upload 201 in 1.31 s; same file again → existing document with `Idempotent-Replayed: true`; "How long does a customer have to report a disputed card payment?" → answered, cites page 2 (score 0.919), 2.02 s; "What is the overdraft fee?" → `not_enough_evidence` (`no_relevant_passages`), 0.027 s. A second user: same question → 0 passages retrieved; owner's document via GET, DELETE and `document_ids` → 404. Owner DELETE → 204; Qdrant points for the document 5 → 0. Server log contained no document text.
+
+### 2026-11-26 · Test suite after document Q&A milestone
+- Version: 0.5.0 · Command: `cd backend && uv run pytest` (3 runs, Ollama running)
+- Result: 147 passed, 0 failed, 0 skipped (includes 1 live-Ollama test, skipped in CI). Wall time 13.50 / 13.13 / 13.11 s (median 13.13 s).

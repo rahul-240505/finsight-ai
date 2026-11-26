@@ -12,8 +12,8 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
 from app.api.deps import DbSession, require_permission
+from app.api.uploads import read_body
 from app.core.config import get_settings
-from app.core.errors import PayloadTooLarge, UnsupportedMediaType
 from app.core.permissions import Permission
 from app.db.models import User
 from app.modules.datasets import service
@@ -28,21 +28,7 @@ CSV_TYPES = {"text/csv", "application/csv"}
 
 
 async def read_csv_body(request: Request) -> bytes:
-    """Read the upload with a hard size cap, without trusting Content-Length alone."""
-    content_type = request.headers.get("content-type", "").split(";")[0].strip().lower()
-    if content_type not in CSV_TYPES:
-        raise UnsupportedMediaType("Send the file as the request body with Content-Type: text/csv.")
-    limit = get_settings().max_upload_bytes
-    declared = request.headers.get("content-length")
-    if declared and declared.isdigit() and int(declared) > limit:
-        raise PayloadTooLarge(f"The file is larger than {limit} bytes.")
-    chunks, size = [], 0
-    async for chunk in request.stream():
-        size += len(chunk)
-        if size > limit:
-            raise PayloadTooLarge(f"The file is larger than {limit} bytes.")
-        chunks.append(chunk)
-    return b"".join(chunks)
+    return await read_body(request, CSV_TYPES, get_settings().max_upload_bytes)
 
 
 @router.post("/preview")

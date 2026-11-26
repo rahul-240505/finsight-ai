@@ -16,14 +16,20 @@ class Role(StrEnum):
 class Permission(StrEnum):
     DATASET_READ = "dataset:read"
     DATASET_WRITE = "dataset:write"
+    DOCUMENT_READ = "document:read"  # includes asking questions about documents
+    DOCUMENT_WRITE = "document:write"
     REPORT_READ = "report:read"
     REPORT_WRITE = "report:write"
     REPORT_APPROVE = "report:approve"
     USER_MANAGE = "user:manage"
 
 
-_VIEWER = {Permission.DATASET_READ, Permission.REPORT_READ}
-_ANALYST = _VIEWER | {Permission.DATASET_WRITE, Permission.REPORT_WRITE}
+_VIEWER = {Permission.DATASET_READ, Permission.DOCUMENT_READ, Permission.REPORT_READ}
+_ANALYST = _VIEWER | {
+    Permission.DATASET_WRITE,
+    Permission.DOCUMENT_WRITE,
+    Permission.REPORT_WRITE,
+}
 _ADMIN = _ANALYST | {Permission.REPORT_APPROVE, Permission.USER_MANAGE}
 
 ROLE_PERMISSIONS: dict[Role, frozenset[Permission]] = {

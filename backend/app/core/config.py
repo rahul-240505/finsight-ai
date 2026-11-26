@@ -28,6 +28,12 @@ class Settings(BaseSettings):
     # Model names live only here (ADR-003). Changing the embed model means re-embedding all docs.
     ollama_chat_model: str = "qwen3.5:4b"
     ollama_embed_model: str = "nomic-embed-text"
+    # nomic-embed-text expects a task prefix; another embed model may need different ones.
+    embed_document_prefix: str = "search_document: "
+    embed_query_prefix: str = "search_query: "
+    embed_dim: int = Field(default=768, gt=0)
+    ollama_timeout_seconds: float = Field(default=120.0, gt=0)
+    ollama_num_ctx: int = Field(default=4096, ge=1024)
     ready_timeout_seconds: float = Field(default=2.0, gt=0, le=10)
 
     # Auth (ADR-005): opaque session token in an HttpOnly, Secure, SameSite=Lax cookie.
@@ -42,6 +48,20 @@ class Settings(BaseSettings):
 
     # Trained model files (git-ignored). model_versions stores paths relative to this folder.
     model_dir: Path = REPO_ROOT / "ml" / "artifacts"
+
+    # Documents and question answering (ADR-009).
+    qdrant_collection: str = "document_chunks"
+    max_pdf_bytes: int = Field(default=20 * 1024 * 1024, gt=0)
+    max_pdf_pages: int = Field(default=200, gt=0)
+    # 100/20 beat 200/40 and 350/60 on dev MRR@5 (docs/evaluation.md).
+    chunk_max_words: int = Field(default=100, gt=10)
+    chunk_overlap_words: int = Field(default=20, ge=0)
+    rag_top_k: int = Field(default=5, ge=1, le=10)
+    # Below this cosine similarity the best match is treated as unrelated, and the answer is
+    # "not enough evidence" without calling the chat model. Specific to the embedding model;
+    # set on the eval dev split as the highest value that blocks no answerable question.
+    rag_min_score: float = Field(default=0.64, ge=0, le=1)
+    rag_max_answer_tokens: int = Field(default=400, gt=0)
 
 
 @lru_cache
