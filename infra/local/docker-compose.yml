@@ -1,4 +1,4 @@
-# Data stores only. API, worker and frontend run on the host (CLAUDE.md §4).
+# Data stores only. The API, worker and frontend run on the host.
 # Run from repo root:  docker compose --env-file .env -f infra/local/docker-compose.yml up -d
 name: finsight
 

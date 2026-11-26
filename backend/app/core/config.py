@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     qdrant_url: str = "http://localhost:6333"
     ollama_base_url: str = "http://localhost:11434"
+    # Model names live only here (ADR-003). Changing the embed model means re-embedding all docs.
+    ollama_chat_model: str = "qwen3.5:4b"
+    ollama_embed_model: str = "nomic-embed-text"
     ready_timeout_seconds: float = Field(default=2.0, gt=0, le=10)
 
 
