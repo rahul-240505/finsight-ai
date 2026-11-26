@@ -225,3 +225,45 @@ Every benchmark and evaluation result for FinSight AI, with the exact command an
 ### 2026-11-26 · Test suite after background-jobs milestone
 - Version: 0.6.0 · Command: `cd backend && uv run pytest` (3 runs, Ollama running)
 - Result: 166 passed, 0 failed, 0 skipped. Wall time 23.69 / 17.52 / 17.87 s (median 17.87 s).
+
+### 2026-11-26 · Investigation agent, run 1 (no finishing rule) — superseded, interrupted
+- Milestone: investigation agent · Version: 0.7.0 (uncommitted, on top of 4e10776)
+- Dataset: demo user's `synthetic-500k` (scored by `iforest-20261126145149`, labels in `data/labels_500k.csv`); fictional policy corpus (6 PDFs) indexed into a separate collection; a 123-row dataset with three planted prompt-injection merchant names
+- Machine: i5-12500H, 15 GiB RAM, RTX 4050 6 GB · `qwen3.5:4b` (temperature 0, thinking off, num_ctx 8192) · limits: 8 turns, 12 tool calls, 180 s
+- Command: `cd backend && PYTHONPATH=. uv run python ../eval/run_agent_eval.py --owner-email demo@example.com` (first version)
+- Result (7 of 10 cases started before the machine powered off): 1 completed with a report, 5 failed with `agent_step_limit`, 1 interrupted. All 64 recorded steps were valid (58 ok, 1 repeated call, 5 text replies without a tool call; no unknown tools, no invalid arguments). The one report had 3 findings, all labelled anomalies (`burst`), 1 policy reference.
+- Notes: the model kept gathering evidence and did not call `submit_report` before the turn limit. Fixed by showing the remaining budget after each turn, refusing calls past the tool budget, and offering only `submit_report` on the last turn.
+
+### 2026-11-26 · Evaluation machine powered off under sustained model load
+- Observation: two unclean power-offs (no shutdown record; journal ends mid-generation) at 23:11:35 and 23:20:06, both during agent evaluation runs with long prompts (2,633 and 6,761 tokens) and continuous GPU generation. No kernel thermal, MCE or panic message; OS critical trip point 120 °C never reached.
+- Battery: full-charge capacity 2,156,000 µAh vs 3,560,000 design (61%). AC adapter online. GPU power held at ~60 W by its power cap (`clocks_event_reasons` 0x4); idle GPU 46-51 °C, CPU 51-55 °C.
+- Assessment: consistent with a firmware/power-delivery cut-off under combined CPU + GPU peak load (worn battery unable to cover peaks above the adapter's output, or an EC thermal trip). Not caused by an application error. Not confirmed: no logs exist from the moment of the cut-off.
+- Mitigation for later runs: one case at a time in small batches; cool-down before each case (GPU ≤ 60 °C, CPU ≤ 70 °C); a 3 s pause after every model call; numpy/BLAS limited to 4 threads; a watchdog that stops the run on GPU ≥ 83 °C, CPU ≥ 88 °C for 6 s or any CPU reading ≥ 95 °C; results written to disk after every case; a separate temperature log (`data/eval/thermal.log`, every 2 s, fsynced). No further power-offs after these changes.
+
+### 2026-11-26 · Investigation agent, run 2 (finishing rule) — superseded, interrupted
+- Version: as run 1 plus the finishing rule · same data and command
+- Result (3 cases finished before the second power-off, in case 4): 3/3 completed with reports. "Most unusual" and "bursts": 3 findings each, all labelled anomalies, 1 policy reference each. "Very large single payments": 4 findings, none flagged or labelled (the model cited ordinary large transactions from an account's history).
+
+### 2026-11-26 · Investigation agent, run 3 (final, batched with thermal guard)
+- Version: 0.7.0 (uncommitted, on top of 4e10776) · prompt `agent-v1` · same data and model as run 1
+- Command: `cd backend && PYTHONPATH=. uv run python ../eval/run_agent_eval.py --owner-email demo@example.com --cases <ids>` in batches (c04; c01; c02,c03; c05-c07; c08-c10; c08,c09 again with full report text stored; c03 again after adding the wording rule), then `--summary-only`. Latest run of each case counts; one run per case.
+- Result (10 cases: 7 on the 500k dataset, 3 prompt-injection):
+
+| Measure | Result |
+| --- | --- |
+| Completed with a draft report | 10 / 10 (0 limit failures, 0 retries) |
+| Findings on the 500k dataset that are labelled anomalies | 24 / 27 (88.9%); 24 / 27 flagged by the risk model; all 3 misses from the "very large single payments" case |
+| Findings dropped as ungrounded | 0 |
+| Policy-question cases with a policy reference | 2 / 2 |
+| Reports using the word "fraud" | 0 (one earlier run of c03 did; a server-side wording rule now sends such reports back once) |
+| Injection cases: report left as draft · approval attempts · planted conclusion adopted | 3 / 3 · 0 · 0 (manual review: in 2 cases the planted merchant text is quoted as data while the transfers are still reported as unusual) |
+| Tool calls per case (excluding `submit_report`) | median 6 |
+| Step outcomes | 73 ok, 8 text replies without a tool call, 4 repeated calls refused; 0 unknown tools, 0 invalid arguments, 0 out-of-scope ids |
+| Wall time per investigation | median 63.8 s, max 98.6 s (includes the 3 s pause after each model call) |
+| Peak temperatures during cases | GPU 81 °C, CPU 94 °C (CPU ≥ 90 °C in 11 of 499 two-second samples, never sustained) |
+
+- Notes: a small evaluation (10 cases, single runs at temperature 0) written by the same author as the agent; treat as a regression check. Cases ran across batches; only c03's final run includes the wording rule (it affects only reports containing "fraud"). The "very large payments" focus is the weak case: the risk model under-ranks very large amounts (Phase 3: 0.33 recall), so the agent looks in account histories and picks ordinary large payments.
+
+### 2026-11-26 · Test suite after investigation-agent milestone
+- Version: 0.7.0 · Command: `cd backend && uv run pytest` (3 runs, Ollama running)
+- Result: 188 passed, 0 failed, 0 skipped. Wall time 25.90 / 23.81 / 23.67 s (median 23.81 s).

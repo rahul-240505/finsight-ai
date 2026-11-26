@@ -18,7 +18,7 @@ Runs entirely on your machine: no cloud services, no paid APIs. Uses synthetic a
 | Risk scoring | Isolation Forest anomaly scores with plain-language reasons; versioned, hash-verified models; review queue | ✅ Available |
 | Document Q&A | Questions over your own policy PDFs, answered with page citations; "not enough evidence" when retrieval is weak or citations don't check out; owner-isolated vector search | ✅ Available |
 | Background jobs | Imports, scoring and PDF indexing run in a worker (202 + job status), with retries, time limits, crash recovery and duplicate-request joining; Redis rate limits with `429` + `Retry-After` | ✅ Available |
-| Investigation agent | Read-only allowlisted tools, step limits, audit log, human approval | 🛠️ Planned |
+| Investigation agent | Drafts an investigation report with a local model using five read-only, allowlisted tools; validated arguments, hard step/time limits, findings checked against tool results, full step audit trail; reports need approval by a second person | ✅ Available |
 
 ## Architecture
 
@@ -39,6 +39,7 @@ flowchart LR
 - **Measured ML:** leak-free per-account features, time-based train/validation/test split, baselines and bootstrap confidence intervals. See [ADR-011](docs/decisions/ADR-011-anomaly-scoring.md).
 - **Grounded document Q&A:** plain-Python retrieval over Qdrant with a mandatory owner filter, re-checked against PostgreSQL (which holds the text); server-side citation checks; fenced, untrusted document text. See [ADR-009](docs/decisions/ADR-009-rag-isolation.md).
 - **Background jobs:** RQ on Redis delivers job ids; the `jobs` table in PostgreSQL is the source of truth, so a lost queue message or a killed worker loses no work. See [ADR-004](docs/decisions/ADR-004-background-jobs.md) and [ADR-007](docs/decisions/ADR-007-rate-limiting.md) (rate limits).
+- **Constrained agent:** a plain-Python tool loop; the model can only read the requesting user's data in one dataset, and it can only draft. See [ADR-012](docs/decisions/ADR-012-investigation-agent.md).
 - **Safe imports:** all-or-nothing CSV imports with required idempotency keys, duplicate-file detection and bulk `COPY`. See [ADR-008](docs/decisions/ADR-008-imports-idempotency.md).
 - **Data stores in Docker:** PostgreSQL 17, Redis 7.4 and Qdrant 1.15 via Docker Compose. The API runs on the host.
 
@@ -95,6 +96,10 @@ Interactive API docs: <http://localhost:8000/docs>
 | `GET` | `/api/v1/documents` · `/api/v1/documents/{id}` | `document:read`, owner only |
 | `DELETE` | `/api/v1/documents/{id}` | `document:write`, owner only (text, chunks and vectors) |
 | `POST` | `/api/v1/answers` | `document:read`: `{"question": …, "document_ids"?: […], "top_k"?: 1-10}` → answer with page citations, or `not_enough_evidence` with a reason |
+| `POST` | `/api/v1/investigations` | `report:write`: `{"dataset_id": …, "focus"?: …}` (`Idempotency-Key` required) → `202` + job; its `result.report_id` is a draft |
+| `GET` | `/api/v1/reports` · `/api/v1/reports/{id}` · `/{id}/steps` | `report:read`: your reports (reviewers also see submitted ones) and the agent's step-by-step audit trail |
+| `POST` | `/api/v1/reports/{id}/submit` | `report:write`, owner: draft → submitted |
+| `POST` | `/api/v1/reports/{id}/approve` · `/reject` | `report:approve` (admin), never on your own report: submitted → approved / rejected |
 | `GET` | `/api/v1/jobs` · `/api/v1/jobs/{id}` | Signed in, owner only: `status` (`queued`, `running`, `succeeded`, `failed`), `result`, `error`, `attempts` |
 | `PATCH` | `/api/v1/users/{id}/role` | `user:manage` (admin) |
 
@@ -138,6 +143,13 @@ curl -b jar -X POST localhost:8000/api/v1/answers -H "Content-Type: application/
     -d '{"question": "How long does a customer have to report a disputed payment?"}'
 ```
 
+Evaluate the investigation agent (heavy on a laptop: runs cases one by one with cool-downs and a temperature watchdog; `--cases c01,c02` runs a subset):
+
+```bash
+cd backend
+PYTHONPATH=. uv run python ../eval/run_agent_eval.py --owner-email demo@example.com --fresh
+```
+
 Evaluate document Q&A on the bundled fictional policy corpus (`eval/`):
 
 ```bash
@@ -174,12 +186,13 @@ All numbers come from [docs/evaluation.md](docs/evaluation.md) and were measured
 
 | Measurement | Result |
 | --- | --- |
-| Test suite | 166 passed (unit + integration against PostgreSQL, Redis and Qdrant), median 17.9 s |
+| Test suite | 188 passed (unit + integration against PostgreSQL, Redis and Qdrant), median 23.8 s |
 | Anomaly scoring, test month (synthetic, labelled injections) | PR-AUC 0.658 [95% CI 0.614-0.700] vs 0.202 best single rule, 0.011 random; precision 0.71, recall 0.55 |
 | Supervised fraud model, public card dataset (75 test frauds) | Logistic regression PR-AUC 0.744 [0.630-0.852]; gradient boosting 0.753, difference not significant |
 | Scoring 500k transactions | Accepted in 0.04 s median; job 22.5-24.1 s after VACUUM (30.9 s median with dead rows from repeated re-scoring) |
 | Worker crash recovery | Worker and work horse killed mid-import → job re-delivered after the stale limit, succeeded on attempt 2, no duplicate rows |
 | Rate limit, questions | 30 per minute accepted, 31st → `429` with `Retry-After` |
+| Investigation agent, 10 cases (`qwen3.5:4b`) | 10/10 draft reports; 24/27 findings are labelled anomalies; 0 unknown tools, invalid arguments or out-of-scope ids; 3/3 prompt-injection cases stayed drafts with no approval attempts; median 64 s per investigation |
 | Document Q&A retrieval, fictional 6-PDF corpus (42 answerable questions) | Recall@1 0.786, Recall@3 1.000, MRR@5 0.877 (100-word chunks, chosen on the dev split) |
 | Document Q&A end to end (55 questions) | 42/42 answered with a correct-page citation; citation precision 0.98; 10/10 unanswerable → "not enough evidence"; 3/3 prompt-injection probes passed; median 1.32 s per answer |
 | CSV import, 500k rows via API | Accepted (`202`) in 0.13 s median, job done in 14.3 s (3 runs); previously a 20.5 s synchronous request. `/health` p50 1.8 ms during the import |
@@ -198,5 +211,5 @@ All numbers come from [docs/evaluation.md](docs/evaluation.md) and were measured
 - [x] Anomaly scoring and model evaluation
 - [x] Document Q&A with citations
 - [x] Background jobs and rate limiting
-- [ ] Investigation agent with human approval
+- [x] Investigation agent with human approval
 - [ ] Web UI, structured logging, threat model

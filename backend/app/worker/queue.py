@@ -21,7 +21,12 @@ logger = logging.getLogger(__name__)
 
 # Per-kind hard time limits. RQ kills a job that runs longer (the work horse process is
 # terminated), which also bounds a malicious PDF that makes the parser spin.
-TIMEOUTS = {"dataset_import": 900, "risk_scoring": 900, "document_index": 300}
+TIMEOUTS = {
+    "dataset_import": 900,
+    "risk_scoring": 900,
+    "document_index": 300,
+    "investigation": 300,  # above agent_timeout_seconds, which stops the loop first
+}
 TASK = "app.worker.tasks.execute"
 
 

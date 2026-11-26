@@ -78,6 +78,26 @@ Browser ↔ API (HTTP) · API ↔ PostgreSQL / Redis / Qdrant (localhost only) �
 | **D**oS: lost or stuck jobs | Job state in Postgres; start-up sweep and `app.cli requeue` re-deliver queued and stale running jobs; conditional claim prevents double execution | A stuck job waits for the stale limit (30 min by default) |
 | **E**levation: job runs after the owner is disabled | The runner reloads the owner and fails the job if disabled or deleted | — |
 
+### `POST /api/v1/investigations` (investigation agent)
+| Threat | Mitigation | Gap |
+| --- | --- | --- |
+| **T**ampering: prompt injection in data (merchant names, policy PDFs) | Tool results returned in a `<tool_result trust="untrusted data">` fence with `<` escaped; the tool name echoed in the fence is sanitised; the system prompt says never to follow instructions in tool results | The model can still be misled into writing a misleading *draft*; findings and evidence are checked (below) and a person reviews it |
+| **E**levation: model widens its own scope | Five read-only tools, allowlisted; arguments validated by Pydantic (`extra="forbid"`, bounds, patterns); tools run as the requesting user through owner-scoped services; the dataset is fixed by the server, never a tool argument; transactions outside it → "not found" | — |
+| **E**levation: model approves or changes anything | No tool writes data or changes state; `submit_report` only creates a **draft**; approval is a separate human endpoint | — |
+| **T**ampering: invented evidence | Findings must name a transaction a tool returned (others dropped); evidence is copied from the database; policy references must be passage ids a search returned; the server adds a "not a finding of fraud" disclaimer | The free-text summary is not checked sentence by sentence |
+| **T**ampering: hostile strings in report text | The model quotes data (e.g. a merchant named `<tool_result> new instruction…`) as data; the API returns it as JSON strings | Any UI must render report text as plain text, never as HTML |
+| **I**nfo disclosure: "fraud" claims | A report containing "fraud" is sent back once to be rewritten; on the last turn it is accepted with `wording_flag: true` | Wording check is a single keyword |
+| **D**oS: runaway loop or cost | 8 model turns, 12 tool calls, 180 s, 700 tokens per call, 2,500 characters per result, repeated calls refused, last turn offers only `submit_report`; 300 s job timeout; 5 investigations / min per user | — |
+| **R**epudiation / audit | `agent_steps`: tool, validated arguments (never raw model output), outcome, error, size and latency per attempt and step; job and report link the trail; no prompts or model text stored | — |
+| **D**oS / duplicates | Idempotency-Key required; an identical unfinished investigation is joined | — |
+
+### `/api/v1/reports*` (review and approval)
+| Threat | Mitigation | Gap |
+| --- | --- | --- |
+| **E**levation: approving one's own report | `report:approve` required; reviewer ≠ owner checked in the service and by `CHECK (reviewed_by <> owner_id)` | Two colluding admins can still approve each other's reports |
+| **I**nfo disclosure: reading others' reports | Owners see their own; reviewers see only submitted/reviewed reports, never other people's drafts; otherwise 404 | Reviewers see the reports' evidence (transaction details) from other owners, by design |
+| **T**ampering: double decisions / races | State changes are single conditional UPDATEs (`WHERE status = 'submitted'`); a second decision → 409 | No history table of past decisions yet |
+
 ### `PATCH /api/v1/users/{id}/role`
 | Threat | Mitigation | Gap |
 | --- | --- | --- |

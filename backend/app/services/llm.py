@@ -5,13 +5,14 @@ for tests. Logs carry model name, latency and token counts, never prompt or docu
 """
 
 import hashlib
+import json
 import logging
 import math
 import re
 import time
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 import httpx
 
@@ -30,12 +31,21 @@ class ModelUnavailable(AppError):
 
 
 @dataclass(frozen=True)
+class ToolCall:
+    """A tool the model asked to run. Arguments are untrusted until validated."""
+
+    name: str
+    arguments: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class ChatResult:
     text: str
     model: str
     prompt_tokens: int
     completion_tokens: int
     latency_ms: float
+    tool_calls: tuple[ToolCall, ...] = ()
 
 
 class LLMProvider(Protocol):
@@ -44,7 +54,13 @@ class LLMProvider(Protocol):
 
     def embed(self, texts: list[str], kind: EmbedKind) -> list[list[float]]: ...
 
-    def chat(self, messages: list[dict[str, str]], max_tokens: int) -> ChatResult: ...
+    def chat(
+        self,
+        messages: list[dict[str, Any]],
+        max_tokens: int,
+        tools: list[dict] | None = None,
+        num_ctx: int | None = None,
+    ) -> ChatResult: ...
 
 
 class OllamaProvider:
@@ -95,8 +111,14 @@ class OllamaProvider:
             and any(x != 0 for x in vector)
         )
 
-    def chat(self, messages: list[dict[str, str]], max_tokens: int) -> ChatResult:
-        body = {
+    def chat(
+        self,
+        messages: list[dict[str, Any]],
+        max_tokens: int,
+        tools: list[dict] | None = None,
+        num_ctx: int | None = None,
+    ) -> ChatResult:
+        body: dict[str, Any] = {
             "model": self.chat_model,
             "messages": messages,
             "stream": False,
@@ -104,17 +126,31 @@ class OllamaProvider:
             "options": {
                 "temperature": 0,
                 "num_predict": max_tokens,
-                "num_ctx": self.settings.ollama_num_ctx,
+                "num_ctx": num_ctx or self.settings.ollama_num_ctx,
             },
         }
+        if tools:
+            body["tools"] = tools
         started = time.perf_counter()
         data = self._post("/api/chat", body)
+        message = data.get("message") or {}
+        calls = []
+        for call in message.get("tool_calls") or []:
+            fn = call.get("function") or {}
+            args = fn.get("arguments")
+            if isinstance(args, str):  # some models return JSON text instead of an object
+                try:
+                    args = json.loads(args)
+                except json.JSONDecodeError:
+                    args = {"_unparsed": args[:200]}
+            calls.append(ToolCall(str(fn.get("name", "")), args if isinstance(args, dict) else {}))
         result = ChatResult(
-            text=data["message"]["content"],
+            text=message.get("content") or "",
             model=self.chat_model,
             prompt_tokens=data.get("prompt_eval_count", 0),
             completion_tokens=data.get("eval_count", 0),
             latency_ms=(time.perf_counter() - started) * 1000,
+            tool_calls=tuple(calls),
         )
         logger.info(
             "chat model=%s prompt_tokens=%d completion_tokens=%d latency_ms=%.0f",
@@ -141,7 +177,9 @@ class FakeProvider:
     def __init__(self, dim: int = 768, reply: str | None = None) -> None:
         self.dim = dim
         self.reply = reply
-        self.last_messages: list[dict[str, str]] = []
+        self.script: list[Any] = []
+        self.offered_tools: list[list[str]] = []  # tool names offered on each chat call
+        self.last_messages: list[dict[str, Any]] = []
 
     def embed(self, texts: list[str], kind: EmbedKind) -> list[list[float]]:
         return [self._vector(t) for t in texts]
@@ -154,8 +192,22 @@ class FakeProvider:
         norm = math.sqrt(sum(x * x for x in v)) or 1.0
         return [x / norm for x in v]
 
-    def chat(self, messages: list[dict[str, str]], max_tokens: int) -> ChatResult:
+    def chat(
+        self,
+        messages: list[dict[str, Any]],
+        max_tokens: int,
+        tools: list[dict] | None = None,
+        num_ctx: int | None = None,
+    ) -> ChatResult:
         self.last_messages = messages
+        self.offered_tools.append([t["function"]["name"] for t in tools or []])
+        if self.script:  # scripted turns: a ChatResult, an exception, or f(messages)
+            step = self.script.pop(0)
+            if callable(step):
+                step = step(messages)
+            if isinstance(step, BaseException):
+                raise step
+            return step
         text = self.reply if self.reply is not None else self._extract(messages[-1]["content"])
         return ChatResult(text, self.chat_model, 0, 0, 0.0)
 

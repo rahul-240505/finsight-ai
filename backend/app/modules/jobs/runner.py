@@ -50,11 +50,17 @@ Handler = Callable[[Session, User, dict, Deps], dict]
 
 def _handlers() -> dict[str, Handler]:
     # Imported here to keep the module graph acyclic (services import nothing from jobs).
+    from app.modules.agent.service import run_investigation
     from app.modules.datasets.service import run_import
     from app.modules.documents.service import run_index
     from app.modules.ml.service import run_scoring
 
-    return {"dataset_import": run_import, "risk_scoring": run_scoring, "document_index": run_index}
+    return {
+        "dataset_import": run_import,
+        "risk_scoring": run_scoring,
+        "document_index": run_index,
+        "investigation": run_investigation,
+    }
 
 
 def _error(exc: Exception) -> dict:

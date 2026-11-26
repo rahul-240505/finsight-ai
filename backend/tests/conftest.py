@@ -11,22 +11,27 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import httpx
+import pandas as pd
 import psycopg
 import pytest
 from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
+from sklearn.ensemble import IsolationForest
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.permissions import Role
-from app.db.models import User
+from app.db.models import ModelVersion, User
 from app.db.session import get_db
 from app.main import create_app
 from app.modules.auth import service as auth_service
 from app.modules.jobs.runner import Deps, RetryLater, run_job
+from app.modules.ml import registry
+from app.modules.ml.features import FEATURE_NAMES, build_features
+from app.modules.ml.model import RiskModel
 from app.services.llm import FakeProvider, get_llm
 from app.services.vector_store import QdrantStore, VectorStoreUnavailable, get_vector_store
 from app.worker.queue import InlineQueue, get_job_queue
@@ -230,3 +235,46 @@ def index_pdf(client: TestClient, pdf: bytes, name: str = "policy.pdf") -> str:
     job = job_of(client, response)
     assert job["status"] == "succeeded", job
     return job["result"]["document_id"]
+
+
+def normal_rows(account: str, start: int) -> list[str]:
+    return [
+        f"{account}-{d},{account},2025-02-{d % 28 + 1:02d}T{10 + d % 8}:00:00Z,"
+        f"{20 + d % 5}.00,USD,Shop {d % 2},food"
+        for d in range(start, start + 40)
+    ]
+
+
+@pytest.fixture
+def csv_text() -> str:
+    rows = normal_rows("A", 0) + normal_rows("B", 100)
+    rows.append("OUTLIER,A,2025-03-15T03:10:00Z,4999.00,USD,QuickCrypto,transfer")
+    return CSV_HEADER + "\n".join(rows) + "\n"
+
+
+@pytest.fixture
+def active_model(
+    db: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, csv_text: str
+) -> ModelVersion:
+    """Train a tiny Isolation Forest on the normal rows and register it as active."""
+    monkeypatch.setattr(get_settings(), "model_dir", tmp_path)
+    df = pd.read_csv(pd.io.common.StringIO(csv_text)).rename(columns={"timestamp": "occurred_at"})
+    df = df[df["transaction_id"] != "OUTLIER"]
+    X = build_features(df)
+    model = RiskModel(IsolationForest(n_estimators=50, random_state=0).fit(X), X, combine=False)
+    sha = registry.save_model(model, "test/model.joblib")
+    version = ModelVersion(
+        name="isolation_forest",
+        version="test-v1",
+        algorithm="IsolationForest",
+        feature_names=FEATURE_NAMES,
+        params={},
+        metrics={},
+        # Flags roughly the top 5%. This fixture tests the API plumbing; model quality is
+        # measured on 500k rows by ml/training/train_isolation_forest.py.
+        threshold=0.95,
+        training_data="test fixture",
+        artifact_path="test/model.joblib",
+        artifact_sha256=sha,
+    )
+    return registry.register(db, version, activate=True)

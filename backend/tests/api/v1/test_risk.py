@@ -1,67 +1,17 @@
 """Risk scoring through the API with a small real model, plus permissions and isolation."""
 
 from collections.abc import Callable
-from pathlib import Path
 
-import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
-from sklearn.ensemble import IsolationForest
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.core.config import get_settings
 from app.core.permissions import Role
 from app.db.models import ModelVersion, RiskAssessment
-from app.modules.ml import registry
-from app.modules.ml.features import FEATURE_NAMES, build_features
-from app.modules.ml.model import RiskModel
-from tests.conftest import CSV_HEADER, import_csv, job_of, login
+from tests.conftest import import_csv, job_of, login
 
 pytestmark = pytest.mark.integration
-
-
-def normal_rows(account: str, start: int) -> list[str]:
-    return [
-        f"{account}-{d},{account},2025-02-{d % 28 + 1:02d}T{10 + d % 8}:00:00Z,"
-        f"{20 + d % 5}.00,USD,Shop {d % 2},food"
-        for d in range(start, start + 40)
-    ]
-
-
-@pytest.fixture
-def csv_text() -> str:
-    rows = normal_rows("A", 0) + normal_rows("B", 100)
-    rows.append("OUTLIER,A,2025-03-15T03:10:00Z,4999.00,USD,QuickCrypto,transfer")
-    return CSV_HEADER + "\n".join(rows) + "\n"
-
-
-@pytest.fixture
-def active_model(
-    db: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, csv_text: str
-) -> ModelVersion:
-    """Train a tiny Isolation Forest on the normal rows and register it as active."""
-    monkeypatch.setattr(get_settings(), "model_dir", tmp_path)
-    df = pd.read_csv(pd.io.common.StringIO(csv_text)).rename(columns={"timestamp": "occurred_at"})
-    df = df[df["transaction_id"] != "OUTLIER"]
-    X = build_features(df)
-    model = RiskModel(IsolationForest(n_estimators=50, random_state=0).fit(X), X, combine=False)
-    sha = registry.save_model(model, "test/model.joblib")
-    version = ModelVersion(
-        name="isolation_forest",
-        version="test-v1",
-        algorithm="IsolationForest",
-        feature_names=FEATURE_NAMES,
-        params={},
-        metrics={},
-        # Flags roughly the top 5%. This fixture tests the API plumbing; model quality is
-        # measured on 500k rows by ml/training/train_isolation_forest.py.
-        threshold=0.95,
-        training_data="test fixture",
-        artifact_path="test/model.joblib",
-        artifact_sha256=sha,
-    )
-    return registry.register(db, version, activate=True)
 
 
 @pytest.fixture

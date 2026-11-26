@@ -79,7 +79,16 @@ class Settings(BaseSettings):
         "upload": "20/60",
         "scoring": "10/60",
         "answers": "30/60",
+        "investigation": "5/60",
     }
+
+    # Investigation agent (ADR-012). Hard limits, whatever the model asks for.
+    agent_max_turns: int = Field(default=8, ge=1, le=20)  # model calls per investigation
+    agent_max_tool_calls: int = Field(default=12, ge=1, le=40)
+    agent_timeout_seconds: float = Field(default=180.0, gt=0)
+    agent_max_tokens: int = Field(default=700, gt=0)  # per model call
+    agent_num_ctx: int = Field(default=8192, ge=2048)  # tool results need more context
+    agent_result_chars: int = Field(default=2500, gt=100)  # each tool result is cut to this
 
 
 @lru_cache

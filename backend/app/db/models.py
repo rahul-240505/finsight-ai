@@ -235,7 +235,7 @@ class DocumentChunk(Base):
     text: Mapped[str] = mapped_column(Text)
 
 
-JOB_KINDS = ("dataset_import", "risk_scoring", "document_index")
+JOB_KINDS = ("dataset_import", "risk_scoring", "document_index", "investigation")
 JOB_STATUSES = ("queued", "running", "succeeded", "failed")
 
 
@@ -277,3 +277,64 @@ class Job(TimestampMixin, Base):
     attempts: Mapped[int] = mapped_column(Integer, server_default="0")
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+REPORT_STATUSES = ("draft", "submitted", "approved", "rejected")
+
+
+class Report(TimestampMixin, Base):
+    """An investigation report drafted by the agent. Only a person can approve it, and never
+    the person who requested it (four-eyes rule)."""
+
+    __tablename__ = "reports"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN (" + ", ".join(f"'{s}'" for s in REPORT_STATUSES) + ")",
+            name="status_valid",
+        ),
+        CheckConstraint("reviewed_by IS NULL OR reviewed_by <> owner_id", name="four_eyes"),
+        Index("ix_reports_owner_created", "owner_id", "created_at"),
+        Index("ix_reports_status_created", "status", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    dataset_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("datasets.id", ondelete="CASCADE"))
+    job_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("jobs.id", ondelete="SET NULL"))
+    status: Mapped[str] = mapped_column(String(20), server_default="draft")
+    focus: Mapped[str] = mapped_column(String(500))
+    # Validated report body: summary, findings (grounded in tool results), policy refs.
+    content: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    model: Mapped[str] = mapped_column(String(100))
+    prompt_version: Mapped[str] = mapped_column(String(20))
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reviewed_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    review_note: Mapped[str | None] = mapped_column(String(1000))
+
+
+class AgentStep(Base):
+    """One step of an investigation, for the audit trail: which tool with which validated
+    arguments, whether it worked, how long it took. Never the prompt or the model's text."""
+
+    __tablename__ = "agent_steps"
+    __table_args__ = (
+        UniqueConstraint("job_id", "attempt", "step", name="uq_agent_steps_job_attempt_step"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    job_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"))
+    owner_id: Mapped[uuid.UUID] = mapped_column()
+    attempt: Mapped[int] = mapped_column(Integer)  # job attempt: a retried run keeps the old trace
+    step: Mapped[int] = mapped_column(Integer)
+    tool: Mapped[str] = mapped_column(String(100))  # as named by the model (may be unknown)
+    arguments: Mapped[dict[str, Any] | None] = mapped_column(JSONB)  # only after validation
+    status: Mapped[str] = mapped_column(String(30))  # ok | unknown_tool | invalid_arguments | ...
+    error: Mapped[str | None] = mapped_column(String(500))
+    result_chars: Mapped[int] = mapped_column(Integer, server_default="0")
+    latency_ms: Mapped[float] = mapped_column(Float)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("clock_timestamp()")
+    )
