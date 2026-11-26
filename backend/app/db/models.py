@@ -233,3 +233,47 @@ class DocumentChunk(Base):
     chunk_index: Mapped[int] = mapped_column(Integer)
     page: Mapped[int] = mapped_column(Integer)  # 1-based, as people cite pages
     text: Mapped[str] = mapped_column(Text)
+
+
+JOB_KINDS = ("dataset_import", "risk_scoring", "document_index")
+JOB_STATUSES = ("queued", "running", "succeeded", "failed")
+
+
+class Job(TimestampMixin, Base):
+    """Slow work done by the background worker. Postgres is the source of truth for a job's
+    state; the Redis queue only delivers job ids, so losing Redis loses no job."""
+
+    __tablename__ = "jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN (" + ", ".join(f"'{k}'" for k in JOB_KINDS) + ")", name="kind_valid"
+        ),
+        CheckConstraint(
+            "status IN (" + ", ".join(f"'{s}'" for s in JOB_STATUSES) + ")", name="status_valid"
+        ),
+        # At most one unfinished job per (owner, kind, dedupe key): a retried or doubled
+        # request joins the job already in progress instead of starting a second one.
+        Index(
+            "uq_jobs_active_dedupe",
+            "owner_id",
+            "kind",
+            "dedupe_key",
+            unique=True,
+            postgresql_where=text("status IN ('queued', 'running')"),
+        ),
+        Index("ix_jobs_owner_created", "owner_id", "created_at"),
+        Index("ix_jobs_status_created", "status", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    kind: Mapped[str] = mapped_column(String(30))
+    status: Mapped[str] = mapped_column(String(20), server_default="queued")
+    dedupe_key: Mapped[str] = mapped_column(String(100))
+    # Inputs for the worker (ids, a relative upload path); never secrets or file contents.
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    result: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    error: Mapped[dict[str, Any] | None] = mapped_column(JSONB)  # safe code + message only
+    attempts: Mapped[int] = mapped_column(Integer, server_default="0")
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

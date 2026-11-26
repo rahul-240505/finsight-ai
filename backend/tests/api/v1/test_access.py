@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from app.core.permissions import Role
 from app.main import create_app
-from tests.conftest import BASE_URL, login, make_csv, upload
+from tests.conftest import BASE_URL, import_csv, login, make_csv, upload
 
 pytestmark = pytest.mark.integration
 
@@ -68,7 +68,7 @@ def test_user_cannot_see_or_delete_another_users_dataset(
 ) -> None:
     owner, other = make_user(), make_user()
     login(api, owner)
-    dataset_id = upload(api, make_csv(), name="Q3 cards").json()["id"]
+    dataset_id = import_csv(api, make_csv(), name="Q3 cards")
 
     login(api, other)
     assert api.get(f"/api/v1/datasets/{dataset_id}").status_code == 404
@@ -84,7 +84,7 @@ def test_foreign_and_missing_ids_give_the_same_response(
 ) -> None:
     owner, other = make_user(), make_user()
     login(api, owner)
-    dataset_id = upload(api, make_csv(), name="mine").json()["id"]
+    dataset_id = import_csv(api, make_csv(), name="mine")
     login(api, other)
     foreign = api.get(f"/api/v1/datasets/{dataset_id}")
     missing = api.get(f"/api/v1/datasets/{SAMPLE_ID}")
@@ -95,7 +95,7 @@ def test_foreign_and_missing_ids_give_the_same_response(
 def test_list_is_paginated_and_capped(api: TestClient, make_user: Callable) -> None:
     login(api, make_user())
     for i in range(3):
-        assert upload(api, make_csv(start=i * 10), name=f"d{i}").status_code == 201
+        assert import_csv(api, make_csv(start=i * 10), name=f"d{i}")
     first = api.get("/api/v1/datasets", params={"limit": 2}).json()
     second = api.get("/api/v1/datasets", params={"limit": 2, "offset": 2}).json()
     # Pages don't overlap and together cover everything. (All three rows share created_at here,

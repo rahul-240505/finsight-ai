@@ -264,6 +264,18 @@ wheels = [
 ]
 
 [[package]]
+name = "croniter"
+version = "7.0.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "python-dateutil" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/54/17/3c60d4cf8c8768f8a116328f94ddb2f205e64d5afbb1bcb85f315bfbbf42/croniter-7.0.0.tar.gz", hash = "sha256:a0b2568303c774f6a4ea2d4ce2e72b1ee911029c7070d64a1befe05cdb107f5a", size = 191123, upload-time = "2026-11-09T06:52:40.106Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4c/89/10f9987ebdef47dbe9db94e9c00dcbd91a6ff1aa46ad58bee5b50fa454c9/croniter-7.0.0-py3-none-any.whl", hash = "sha256:92090bce3cef195a037a46b78430c4cdd6250e90671d9d7dcd9e486147daaca4", size = 63225, upload-time = "2026-11-09T06:52:38.545Z" },
+]
+
+[[package]]
 name = "dnspython"
 version = "2.9.2"
 source = { registry = "https://pypi.org/simple" }
@@ -320,6 +332,7 @@ dependencies = [
     { name = "pydantic-settings" },
     { name = "pypdf" },
     { name = "redis" },
+    { name = "rq" },
     { name = "scikit-learn" },
     { name = "sqlalchemy" },
     { name = "uvicorn", extra = ["standard"] },
@@ -344,6 +357,7 @@ requires-dist = [
     { name = "pydantic-settings", specifier = ">=2.6" },
     { name = "pypdf", specifier = ">=5.1" },
     { name = "redis", specifier = ">=5.2" },
+    { name = "rq", specifier = ">=2.0" },
     { name = "scikit-learn", specifier = ">=1.5" },
     { name = "sqlalchemy", specifier = ">=2.0.36" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
@@ -1332,6 +1346,20 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/10/8a/408dd829367bb62972bd5d91bd8cc283c24c8344f80a880d4b3901ce43fd/redis-8.2.0.tar.gz", hash = "sha256:58b1493d83ba8f0e3ffe6bd781194ca5c01c91267ae03d29c1087b0b3c7d79c9", size = 5809579, upload-time = "2026-11-23T08:31:56.692Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ea/8f/98458650cca985032598a59caca0641e7889cf4d536dc12dc032bef7df47/redis-8.2.0-py3-none-any.whl", hash = "sha256:4ff649f10fae5e7e97798fb2a84e84a0a66e98310d75cad2b5a572ce0f9f15a7", size = 732892, upload-time = "2026-11-23T08:31:55.011Z" },
+]
+
+[[package]]
+name = "rq"
+version = "3.0.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "click" },
+    { name = "croniter" },
+    { name = "redis" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/bb/dd/386529e533eef3d67e51a430566ebb24382e664168a6612e2260b6b12243/rq-3.0.0.tar.gz", hash = "sha256:b41e39b3c36ec3faf9e2402c638a0b25fe18ebb93a1cb15193bc69694f054618", size = 803458, upload-time = "2026-10-28T15:32:57.123Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4b/b7/bfba8789d38b7a797d4c177969d8c7eaf9dac7d2dcbda61f2ba50d17330c/rq-3.0.0-py3-none-any.whl", hash = "sha256:71b92cb7b2880e0d0ac2a462945e3f09243122f61465cec4238689d8ddf2abf4", size = 143521, upload-time = "2026-10-28T15:32:52.626Z" },
 ]
 
 [[package]]

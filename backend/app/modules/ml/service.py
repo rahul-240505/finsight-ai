@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.core.errors import NotFound
 from app.db.models import RiskAssessment, Transaction, User
 from app.modules.datasets import service as datasets
+from app.modules.jobs import service as jobs
 from app.modules.ml import registry
 from app.modules.ml.features import build_features, explain
 
@@ -116,3 +117,20 @@ def get_for_transaction(db: Session, user: User, transaction_id: uuid.UUID) -> R
     if assessment is None:
         raise NotFound("No risk assessment for this transaction yet.")
     return assessment
+
+
+def start_scoring(db: Session, user: User, dataset_id: uuid.UUID) -> jobs.Created:
+    """Check what can be checked quickly (dataset is yours: 404; a model is active: 409),
+    then queue the scoring job. A dataset already being scored joins that job."""
+    datasets.get_owned(db, user, dataset_id)
+    registry.active_version(db, MODEL_NAME)
+    created = jobs.add(
+        db, user.id, "risk_scoring", str(dataset_id), {"dataset_id": str(dataset_id)}
+    )
+    db.commit()
+    return created
+
+
+def run_scoring(db: Session, user: User, payload: dict, deps: object) -> dict:
+    """Worker side. Re-running replaces the previous scores, so a repeated delivery is safe."""
+    return score_dataset(db, user, uuid.UUID(payload["dataset_id"]))

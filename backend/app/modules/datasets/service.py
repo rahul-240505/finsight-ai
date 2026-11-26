@@ -5,6 +5,7 @@ after loading, so there is no code path that loads someone else's dataset by acc
 """
 
 import hashlib
+import logging
 import uuid
 from dataclasses import asdict, dataclass
 
@@ -15,9 +16,14 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.errors import Conflict, NotFound
 from app.db.models import Dataset, User
-from app.modules.datasets.schemas import DatasetOut
 from app.modules.idempotency import service as idem
+from app.modules.jobs import service as jobs
+from app.modules.jobs import uploads
+from app.modules.jobs.schemas import JobOut
 from app.modules.transactions.validation import InvalidCsv, ValidRow, parse_csv
+from app.worker.queue import JobQueue, enqueue_or_leave_queued
+
+logger = logging.getLogger(__name__)
 
 MAX_PAGE_SIZE = 100
 PREVIEW_SAMPLE_ROWS = 5
@@ -49,17 +55,63 @@ def preview(data: bytes) -> dict:
     }
 
 
-def import_csv(
-    db: Session, user: User, name: str, data: bytes, key: str, request_hash: str
+def start_import(
+    db: Session,
+    user: User,
+    queue: JobQueue,
+    name: str,
+    data: bytes,
+    key: str,
+    request_hash: str,
 ) -> ImportOutcome:
-    """All-or-nothing import (ADR-008): either every row is saved or none is."""
+    """Accept an import and queue it (ADR-004, ADR-008). Responds 202 with the job.
+
+    Checked now (cheap): the Idempotency-Key, and whether this file was already imported.
+    Checked by the worker: every row. An identical file already being imported joins that
+    job instead of starting another.
+    """
     record = idem.find(db, user.id, key)
     if record is not None and (replay := idem.check_replay(record, request_hash)):
         return ImportOutcome(*replay, replayed=True)
-
     content_hash = hashlib.sha256(data).hexdigest()
     _reject_duplicate_file(db, user, content_hash)
-    db.rollback()  # end the read transaction: never hold one open during CPU-heavy parsing
+
+    saved = None
+    try:
+        record = idem.reserve(db, user.id, key, request_hash)
+        job_id = uuid.uuid4()
+        payload = {"name": name, "content_hash": content_hash, "upload": f"{job_id}.csv"}
+        created = jobs.add(db, user.id, "dataset_import", content_hash, payload, job_id)
+        if created.created:
+            saved = uploads.save(job_id, "csv", data)
+        body = JobOut.model_validate(created.job).model_dump(mode="json")
+        idem.complete(record, 202, body)
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        if saved:
+            uploads.delete(saved)
+        return _resolve_race(db, user, key, request_hash, content_hash, exc)
+    except Exception:
+        db.rollback()
+        if saved:
+            uploads.delete(saved)
+        raise
+    if created.created:
+        enqueue_or_leave_queued(queue, created.job)
+    return ImportOutcome(202, body, replayed=False)
+
+
+def run_import(db: Session, user: User, payload: dict, deps: object) -> dict:
+    """Worker side: validate every row, then insert all of them or none (one transaction)."""
+    content_hash = payload["content_hash"]
+    existing = db.scalar(
+        select(Dataset).where(Dataset.owner_id == user.id, Dataset.content_hash == content_hash)
+    )
+    if existing is not None:  # a previous attempt finished the work but not the bookkeeping
+        return {"dataset_id": str(existing.id), "row_count": existing.row_count}
+    data = uploads.read(payload["upload"])
+    db.rollback()  # never hold a transaction open during CPU-heavy parsing
 
     result = parse_csv(data, get_settings().max_import_rows)
     if result.error_count:
@@ -69,23 +121,17 @@ def import_csv(
             error_count=result.error_count,
             errors=[asdict(e) for e in result.errors],
         )
-
-    try:
-        record = idem.reserve(db, user.id, key, request_hash)
-        dataset = Dataset(
-            owner_id=user.id, name=name, row_count=len(result.rows), content_hash=content_hash
-        )
-        db.add(dataset)
-        db.flush()
-        _copy_rows(db, dataset, result.rows)
-        db.refresh(dataset)  # server defaults (status, created_at)
-        body = DatasetOut.model_validate(dataset).model_dump(mode="json")
-        idem.complete(record, 201, body)
-        db.commit()
-    except IntegrityError as exc:
-        db.rollback()
-        return _resolve_race(db, user, key, request_hash, content_hash, exc)
-    return ImportOutcome(201, body, replayed=False)
+    dataset = Dataset(
+        owner_id=user.id,
+        name=payload["name"],
+        row_count=len(result.rows),
+        content_hash=content_hash,
+    )
+    db.add(dataset)
+    db.flush()
+    _copy_rows(db, dataset, result.rows)
+    db.commit()
+    return {"dataset_id": str(dataset.id), "row_count": dataset.row_count}
 
 
 def _reject_duplicate_file(db: Session, user: User, content_hash: str) -> None:

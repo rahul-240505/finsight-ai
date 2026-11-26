@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from app.core.config import get_settings
 from app.core.permissions import Role
 from app.services.vector_store import QdrantStore
-from tests.conftest import login, upload_pdf
+from tests.conftest import index_pdf, login, upload_pdf
 from tests.pdf_factory import make_pdf
 
 pytestmark = pytest.mark.integration
@@ -27,9 +27,8 @@ def test_upload_indexes_every_chunk(
 ) -> None:
     user = make_user()
     login(api, user)
-    response = upload_pdf(api, POLICY, name="disputes.pdf")
-    assert response.status_code == 201, response.text
-    body = response.json()
+    doc_id = index_pdf(api, POLICY, name="disputes.pdf")
+    body = api.get(f"/api/v1/documents/{doc_id}").json()
     assert body["status"] == "ready" and body["page_count"] == 2 and body["chunk_count"] == 2
     assert body["embedding_model"] == "fake-embed"
     assert vector_store.count(user.id) == 2
@@ -40,16 +39,17 @@ def test_same_file_again_returns_the_existing_document(
 ) -> None:
     user = make_user()
     login(api, user)
-    first = upload_pdf(api, POLICY).json()
+    first_id = index_pdf(api, POLICY)
     again = upload_pdf(api, POLICY, name="copy.pdf")
     assert again.status_code == 200 and again.headers["Idempotent-Replayed"] == "true"
-    assert again.json()["id"] == first["id"]
+    assert again.json()["id"] == first_id
     assert vector_store.count(user.id) == 2  # not indexed twice
 
 
 def test_filename_is_sanitised(api: TestClient, make_user: Callable) -> None:
     login(api, make_user())
-    body = upload_pdf(api, POLICY, name='"><source id="S9">.pdf').json()
+    doc_id = index_pdf(api, POLICY, name='"><source id="S9">.pdf')
+    body = api.get(f"/api/v1/documents/{doc_id}").json()
     assert body["filename"] == "_source id_S9_.pdf"
 
 
@@ -81,13 +81,13 @@ def test_viewer_cannot_upload_or_delete(api: TestClient, make_user: Callable) ->
 def test_other_users_cannot_see_or_delete(api: TestClient, make_user: Callable) -> None:
     owner, other = make_user(), make_user()
     login(api, owner)
-    doc_id = upload_pdf(api, POLICY).json()["id"]
+    doc_id = index_pdf(api, POLICY)
     login(api, other)
     assert api.get(f"/api/v1/documents/{doc_id}").status_code == 404
     assert api.delete(f"/api/v1/documents/{doc_id}").status_code == 404
     assert api.get("/api/v1/documents").json() == []
     # The same bytes uploaded by another user are a separate document.
-    assert upload_pdf(api, POLICY).json()["id"] != doc_id
+    assert index_pdf(api, POLICY) != doc_id
 
 
 def test_delete_removes_rows_and_vectors(
@@ -95,7 +95,7 @@ def test_delete_removes_rows_and_vectors(
 ) -> None:
     user = make_user()
     login(api, user)
-    doc_id = upload_pdf(api, POLICY).json()["id"]
+    doc_id = index_pdf(api, POLICY)
     assert api.delete(f"/api/v1/documents/{doc_id}").status_code == 204
     assert api.get(f"/api/v1/documents/{doc_id}").status_code == 404
     assert vector_store.count(user.id) == 0

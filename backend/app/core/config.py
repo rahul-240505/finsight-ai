@@ -63,6 +63,24 @@ class Settings(BaseSettings):
     rag_min_score: float = Field(default=0.64, ge=0, le=1)
     rag_max_answer_tokens: int = Field(default=400, gt=0)
 
+    # Background jobs (ADR-004). Uploads wait on disk until the worker has processed them.
+    upload_dir: Path = REPO_ROOT / "uploads"
+    job_queue_name: str = "finsight"
+    job_max_attempts: int = Field(default=3, ge=1, le=10)
+    # A "running" job older than this is treated as abandoned (worker crashed) and may be
+    # claimed again. Must exceed the longest job timeout.
+    job_stale_after_seconds: int = Field(default=1800, gt=0)
+
+    # Rate limits (ADR-007): "<requests>/<seconds>" per bucket, fixed windows in Redis.
+    rate_limit_prefix: str = "rl"
+    rate_limits: dict[str, str] = {
+        "login_ip": "30/60",
+        "login_email": "10/300",
+        "upload": "20/60",
+        "scoring": "10/60",
+        "answers": "30/60",
+    }
+
 
 @lru_cache
 def get_settings() -> Settings:

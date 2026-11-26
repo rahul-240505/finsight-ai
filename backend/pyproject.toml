@@ -18,6 +18,7 @@ dependencies = [
     "pandas>=2.2",
     "scikit-learn>=1.5",
     "pypdf>=5.1",
+    "rq>=2.0",
 ]
 
 [dependency-groups]

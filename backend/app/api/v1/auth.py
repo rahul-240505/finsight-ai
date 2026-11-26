@@ -1,9 +1,14 @@
 """Auth routes: register, login, logout, me. Thin: parse input, call the service, shape output."""
 
-from fastapi import APIRouter, Request, Response, status
+from typing import Annotated
+
+import redis
+from fastapi import APIRouter, Depends, Request, Response, status
 
 from app.api.deps import CurrentUser, DbSession
+from app.core import rate_limit
 from app.core.config import get_settings
+from app.core.rate_limit import get_redis
 from app.modules.auth import service
 from app.modules.auth.schemas import Credentials, LoginRequest, UserOut
 
@@ -17,9 +22,21 @@ def register(body: Credentials, db: DbSession) -> UserOut:
 
 
 @router.post("/login")
-def login(body: LoginRequest, response: Response, db: DbSession) -> UserOut:
+def login(
+    body: LoginRequest,
+    request: Request,
+    response: Response,
+    db: DbSession,
+    limiter: Annotated[redis.Redis, Depends(get_redis)],
+) -> UserOut:
     """Sets the session cookie. HttpOnly: JavaScript can't read it. Secure: HTTPS only
-    (browsers treat http://localhost as secure). SameSite=Lax: not sent on cross-site POSTs."""
+    (browsers treat http://localhost as secure). SameSite=Lax: not sent on cross-site POSTs.
+
+    Rate limited per client IP and per email address (every attempt counts, successful or
+    not), which slows password guessing against one account and from one machine."""
+    rate_limit.hit(limiter, "login_ip", rate_limit.client_ip(request))
+    email_key = rate_limit.subject_hash(service.normalise_email(body.email))
+    rate_limit.hit(limiter, "login_email", email_key)
     user, token = service.login(db, body.email, body.password)
     settings = get_settings()
     response.set_cookie(

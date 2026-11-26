@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.services.llm import FakeProvider
-from tests.conftest import login, upload_pdf
+from tests.conftest import index_pdf, login, upload_pdf
 from tests.pdf_factory import make_pdf
 
 pytestmark = pytest.mark.integration
@@ -35,7 +35,7 @@ def ask(api: TestClient, question: str, **extra: object) -> dict:
 
 def test_answer_cites_the_right_page(api: TestClient, make_user: Callable) -> None:
     login(api, make_user())
-    doc_id = upload_pdf(api, DISPUTES, name="disputes.pdf").json()["id"]
+    doc_id = index_pdf(api, DISPUTES, name="disputes.pdf")
     body = ask(api, "Within how many days must customers report a disputed card payment?")
     assert body["status"] == "answered" and "60 days" in body["answer"]
     top = body["citations"][0]
@@ -62,7 +62,7 @@ def test_no_documents_means_not_enough_evidence(api: TestClient, make_user: Call
 def test_users_never_retrieve_each_others_documents(api: TestClient, make_user: Callable) -> None:
     owner, other = make_user(), make_user()
     login(api, owner)
-    doc_id = upload_pdf(api, DISPUTES).json()["id"]
+    doc_id = index_pdf(api, DISPUTES)
     login(api, other)
     question = "Within how many days must customers report a disputed card payment?"
     body = ask(api, question)
@@ -74,7 +74,7 @@ def test_users_never_retrieve_each_others_documents(api: TestClient, make_user: 
 def test_document_filter_limits_the_search(api: TestClient, make_user: Callable) -> None:
     login(api, make_user())
     upload_pdf(api, DISPUTES)
-    vendor_id = upload_pdf(api, INJECTED, name="vendor.pdf").json()["id"]
+    vendor_id = index_pdf(api, INJECTED, name="vendor.pdf")
     body = ask(api, "When are vendor invoices paid?", document_ids=[vendor_id])
     assert {c["document_id"] for c in body["citations"]} == {vendor_id}
 

@@ -19,9 +19,12 @@ class AppError(Exception):
     code = "bad_request"
     message = "Bad request."
 
-    def __init__(self, message: str | None = None, **extra: object) -> None:
+    def __init__(
+        self, message: str | None = None, headers: dict[str, str] | None = None, **extra: object
+    ) -> None:
         super().__init__(message or self.message)
         self.message = message or self.message
+        self.headers = headers or {}  # e.g. Retry-After on 429
         self.extra = extra  # extra JSON fields for the error body (e.g. per-row errors)
 
 
@@ -64,7 +67,7 @@ def install_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppError)
     async def app_error(request: Request, exc: AppError) -> JSONResponse:
         body = error_body(request, exc.code, exc.message, **exc.extra)
-        return JSONResponse(body, exc.status_code)
+        return JSONResponse(body, exc.status_code, headers=exc.headers)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:

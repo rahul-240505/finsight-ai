@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends
 
 from app.api.deps import DbSession, require_permission
 from app.core.permissions import Permission
+from app.core.rate_limit import per_user
 from app.db.models import User
 from app.modules.rag import service
 from app.modules.rag.schemas import AnswerOut, CitationOut, QuestionIn
@@ -17,7 +18,7 @@ router = APIRouter(prefix="/answers", tags=["answers"])
 Reader = Annotated[User, Depends(require_permission(Permission.DOCUMENT_READ))]
 
 
-@router.post("")
+@router.post("", dependencies=[Depends(per_user("answers"))])
 def ask(
     body: QuestionIn,
     db: DbSession,

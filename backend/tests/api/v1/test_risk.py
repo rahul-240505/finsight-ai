@@ -16,7 +16,7 @@ from app.db.models import ModelVersion, RiskAssessment
 from app.modules.ml import registry
 from app.modules.ml.features import FEATURE_NAMES, build_features
 from app.modules.ml.model import RiskModel
-from tests.conftest import CSV_HEADER, login, upload
+from tests.conftest import CSV_HEADER, import_csv, job_of, login
 
 pytestmark = pytest.mark.integration
 
@@ -69,9 +69,10 @@ def scored(
     api: TestClient, make_user: Callable, active_model: ModelVersion, csv_text: str
 ) -> tuple[TestClient, str]:
     login(api, make_user())
-    dataset_id = upload(api, csv_text).json()["id"]
-    response = api.post("/api/v1/risk-assessments", json={"dataset_id": dataset_id})
-    assert response.status_code == 200, response.text
+    dataset_id = import_csv(api, csv_text)
+    job = job_of(api, api.post("/api/v1/risk-assessments", json={"dataset_id": dataset_id}))
+    assert job["kind"] == "risk_scoring" and job["status"] == "succeeded", job
+    assert job["result"]["scored"] == 81
     return api, dataset_id
 
 
@@ -90,8 +91,8 @@ def test_scoring_covers_every_row_and_flags_the_outlier(scored: tuple, db: Sessi
 
 def test_rescoring_replaces_instead_of_duplicating(scored: tuple, db: Session) -> None:
     api, dataset_id = scored
-    again = api.post("/api/v1/risk-assessments", json={"dataset_id": dataset_id})
-    assert again.status_code == 200 and again.json()["scored"] == 81
+    again = job_of(api, api.post("/api/v1/risk-assessments", json={"dataset_id": dataset_id}))
+    assert again["status"] == "succeeded" and again["result"]["scored"] == 81
     assert db.scalar(select(func.count()).select_from(RiskAssessment)) == 81
 
 
@@ -118,10 +119,8 @@ def test_viewer_can_read_but_not_score_or_delete(
     api: TestClient, make_user: Callable, active_model: ModelVersion, csv_text: str
 ) -> None:
     owner = make_user(Role.VIEWER)
-    # A viewer can't upload, so promote briefly via the service layer isn't needed:
-    # give the viewer data by importing as an analyst account with the same identity.
     login(api, make_user())
-    assert upload(api, csv_text).status_code == 201
+    assert import_csv(api, csv_text)
     login(api, owner)
     any_id = "00000000-0000-0000-0000-000000000000"
     assert api.post("/api/v1/risk-assessments", json={"dataset_id": any_id}).status_code == 403
@@ -131,7 +130,7 @@ def test_viewer_can_read_but_not_score_or_delete(
 
 def test_no_active_model_is_409(api: TestClient, make_user: Callable, csv_text: str) -> None:
     login(api, make_user())
-    dataset_id = upload(api, csv_text).json()["id"]
+    dataset_id = import_csv(api, csv_text)
     response = api.post("/api/v1/risk-assessments", json={"dataset_id": dataset_id})
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "no_active_model"

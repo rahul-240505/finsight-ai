@@ -12,6 +12,7 @@ import hashlib
 import logging
 import uuid
 from dataclasses import dataclass
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -19,14 +20,54 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.errors import NotFound
-from app.db.models import Document, DocumentChunk, User
+from app.db.models import Document, DocumentChunk, Job, User
 from app.modules.documents.chunking import CHUNKER_VERSION, chunk_pages
-from app.modules.documents.pdf import extract_pages
+from app.modules.documents.pdf import InvalidPdf, extract_pages
+from app.modules.jobs import service as jobs
+from app.modules.jobs import uploads
 from app.services.llm import LLMProvider, ModelUnavailable
 from app.services.vector_store import QdrantStore, VectorPoint, VectorStoreUnavailable
 
 logger = logging.getLogger(__name__)
 MAX_PAGE_SIZE = 100
+
+
+@dataclass(frozen=True)
+class StartOutcome:
+    document: Document | None  # set when this exact file is already indexed
+    job: Job | None  # set when indexing was queued (or an identical upload is in progress)
+    created: bool = False  # True only for a newly queued job, which the caller must enqueue
+
+
+def start_index(db: Session, user: User, filename: str, data: bytes) -> StartOutcome:
+    """Quick checks now (same file already indexed → that document; not a PDF → 422), then
+    queue indexing. Parsing, chunking and embedding happen in the worker, under its time
+    limit."""
+    if not data.startswith(b"%PDF-"):
+        raise InvalidPdf("The file does not start with a PDF header.")
+    content_hash = hashlib.sha256(data).hexdigest()
+    if (existing := _by_hash(db, user, content_hash)) is not None:
+        return StartOutcome(existing, None)
+    job_id = uuid.uuid4()
+    payload = {"filename": filename, "upload": f"{job_id}.pdf"}
+    created = jobs.add(db, user.id, "document_index", content_hash, payload, job_id)
+    saved = uploads.save(job_id, "pdf", data) if created.created else None
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        if saved:
+            uploads.delete(saved)
+        raise
+    return StartOutcome(None, created.job, created.created)
+
+
+def run_index(db: Session, user: User, payload: dict, deps: Any) -> dict:
+    """Worker side. Safe to repeat: an already indexed file returns the existing document."""
+    data = uploads.read(payload["upload"])
+    outcome = ingest(db, user, deps.llm, deps.store, payload["filename"], data)
+    d = outcome.document
+    return {"document_id": str(d.id), "page_count": d.page_count, "chunk_count": d.chunk_count}
 
 
 @dataclass(frozen=True)

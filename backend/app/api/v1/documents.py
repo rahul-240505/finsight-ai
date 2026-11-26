@@ -10,49 +10,56 @@ from fastapi.responses import JSONResponse
 
 from app.api.deps import DbSession, require_permission
 from app.api.uploads import read_body
+from app.api.v1.jobs import accepted
 from app.core.config import get_settings
 from app.core.permissions import Permission
+from app.core.rate_limit import per_user
 from app.db.models import User
 from app.modules.documents import service
 from app.modules.documents.schemas import DocumentOut
-from app.services.llm import LLMProvider, get_llm
+from app.modules.jobs.schemas import JobOut
 from app.services.vector_store import QdrantStore, get_vector_store
+from app.worker.queue import JobQueue, enqueue_or_leave_queued, get_job_queue
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
 Reader = Annotated[User, Depends(require_permission(Permission.DOCUMENT_READ))]
 Writer = Annotated[User, Depends(require_permission(Permission.DOCUMENT_WRITE))]
-Llm = Annotated[LLMProvider, Depends(get_llm)]
+Queue = Annotated[JobQueue, Depends(get_job_queue)]
 Store = Annotated[QdrantStore, Depends(get_vector_store)]
 _UNSAFE_NAME = re.compile(r"[^\w .()\-]+")
 
 
 @router.post(
     "",
-    status_code=status.HTTP_201_CREATED,
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(per_user("upload"))],
     responses={
-        201: {"model": DocumentOut},
+        202: {"model": JobOut, "description": "Indexing queued; follow the Location header"},
         200: {"model": DocumentOut, "description": "This file was already uploaded"},
-        422: {"description": "Not a readable PDF, encrypted, too many pages or no text"},
+        422: {"description": "Not a PDF (other problems appear in the job's error)"},
+        429: {"description": "Too many uploads"},
     },
 )
 async def upload_document(
     request: Request,
     db: DbSession,
     user: Writer,
-    llm: Llm,
-    store: Store,
+    queue: Queue,
     name: Annotated[str, Query(min_length=1, max_length=200)],
 ) -> JSONResponse:
-    """Upload and index a PDF. Idempotent by content: sending the same file again returns the
-    existing document (200, `Idempotent-Replayed: true`) instead of indexing it twice."""
+    """Upload a PDF and queue it for indexing. Idempotent by content: the same file again
+    returns the existing document (200, `Idempotent-Replayed: true`), or the job already
+    indexing it (202)."""
     data = await read_body(request, {"application/pdf"}, get_settings().max_pdf_bytes)
     filename = _UNSAFE_NAME.sub("_", name).strip() or "document.pdf"
-    outcome = await run_in_threadpool(service.ingest, db, user, llm, store, filename, data)
-    body = DocumentOut.model_validate(outcome.document).model_dump(mode="json")
+    outcome = await run_in_threadpool(service.start_index, db, user, filename, data)
+    if outcome.document is not None:
+        body = DocumentOut.model_validate(outcome.document).model_dump(mode="json")
+        return JSONResponse(body, status.HTTP_200_OK, headers={"Idempotent-Replayed": "true"})
     if outcome.created:
-        return JSONResponse(body, status.HTTP_201_CREATED)
-    return JSONResponse(body, status.HTTP_200_OK, headers={"Idempotent-Replayed": "true"})
+        await run_in_threadpool(enqueue_or_leave_queued, queue, outcome.job)
+    return accepted(outcome.job)
 
 
 @router.get("")

@@ -198,3 +198,30 @@ Every benchmark and evaluation result for FinSight AI, with the exact command an
 ### 2026-11-26 · Test suite after document Q&A milestone
 - Version: 0.5.0 · Command: `cd backend && uv run pytest` (3 runs, Ollama running)
 - Result: 147 passed, 0 failed, 0 skipped (includes 1 live-Ollama test, skipped in CI). Wall time 13.50 / 13.13 / 13.11 s (median 13.13 s).
+
+### 2026-11-26 · Rate limiter fail-open cost with Redis unreachable
+- Milestone: background jobs · Version: 0.6.0 (uncommitted, on top of 75b1341)
+- Command: one pipelined `INCR` against `127.0.0.1:1` (nothing listening), redis-py 8.2.0, 0.5 s socket timeouts
+- Result: default client 3.995 s per call (built-in retries with back-off) · `retry=Retry(NoBackoff(), 0)` 0.001 s. In the test suite the fail-open test took 17.09 s before the fix and under 0.5 s after.
+- Notes: the limiter and the job queue's Redis clients now never retry, and the limiter skips Redis for 5 s after an error.
+
+### 2026-11-26 · Background jobs, live (API + RQ worker on the host)
+- Milestone: background jobs · Version: 0.6.0 (uncommitted, on top of 75b1341)
+- Dataset: `data/transactions_500k.csv` (500,000 rows, seed 42), imported by a dedicated benchmark user (deleted afterwards); query indexes present
+- Machine: i5-12500H, 15 GiB RAM · Postgres, Redis in local Docker · `uvicorn app.main:app` + `python -m app.worker` (RQ 3.0.0)
+- Command: benchmark client (httpx): POST, then poll `GET /api/v1/jobs/{id}` every 0.2 s; during each import, `/health` and `GET /api/v1/datasets` probed every 0.1 s from a second client
+- Result, import (3 runs, dataset deleted between runs): accepted (`202`) in 0.143 / 0.123 / 0.129 s (median **0.129 s**, previously a 20.52 s synchronous request); job finished 12.70 / 14.33 / 16.24 s after the POST (median **14.33 s**). During the imports: `/health` p50 1.8 / 1.8 / 1.9 ms (max 6.9 ms, 123-158 probes per run); dataset list p50 5.3-5.5 ms.
+- Result, scoring the same dataset (3 runs): accepted in 0.039 / 0.014 / 0.511 s (median 0.039 s); job 26.22 / 35.67 / 30.88 s (median 30.88 s). `pg_stat_user_tables` then showed 1,000,753 dead rows in `risk_assessments` and 500,000 in `transactions`; after `VACUUM ANALYZE` two more runs took 22.45 / 24.12 s (synchronous baseline 20.6 s).
+- Result, duplicate submission: the same file posted twice in a row with different Idempotency-Keys → both 202 with the **same job id**; 1 dataset created.
+- Result, rate limit: 32 questions in a row → 30 × 200 then 429 (`rate_limited`, `Retry-After: 22`).
+- Notes: job times include the poll interval and the fork per job. The import job times rise run to run (dead rows from deleting the previous 500k-row dataset; same effect as the 2026-11-26 import entry). Re-scoring leaves 500k dead rows per run until autovacuum.
+
+### 2026-11-26 · Worker crash recovery, live
+- Version: 0.6.0 · worker started with `JOB_STALE_AFTER_SECONDS=20`
+- Procedure: queue a 500k-row import; 4 s later `kill -9` the work-horse process and the worker; wait 22 s; start the worker again.
+- Result: after the kill the job stayed `running` (attempt 1, 0 datasets). On start the worker's sweep re-delivered it ("dataset_import, running"); attempt 2 started 0.25 s later and succeeded 13.8 s after that; exactly **1 dataset**, no partial rows from the killed attempt (its transaction never committed). Upload folder empty afterwards.
+- Also observed: killing only the worker parent does *not* stop a running work horse; in a first attempt the orphaned horse finished the job (succeeded, attempt 1).
+
+### 2026-11-26 · Test suite after background-jobs milestone
+- Version: 0.6.0 · Command: `cd backend && uv run pytest` (3 runs, Ollama running)
+- Result: 166 passed, 0 failed, 0 skipped. Wall time 23.69 / 17.52 / 17.87 s (median 17.87 s).

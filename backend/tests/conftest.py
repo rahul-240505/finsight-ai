@@ -26,8 +26,10 @@ from app.db.models import User
 from app.db.session import get_db
 from app.main import create_app
 from app.modules.auth import service as auth_service
+from app.modules.jobs.runner import Deps, RetryLater, run_job
 from app.services.llm import FakeProvider, get_llm
 from app.services.vector_store import QdrantStore, VectorStoreUnavailable, get_vector_store
+from app.worker.queue import InlineQueue, get_job_queue
 
 ALEMBIC_INI = Path(__file__).resolve().parents[1] / "alembic.ini"
 PASSWORD = "correct-horse-battery"  # test-only, meets the 12-character policy
@@ -114,21 +116,45 @@ def fake_llm() -> FakeProvider:
 
 
 @pytest.fixture
+def inline_queue(db: Session, fake_llm: FakeProvider, vector_store: QdrantStore) -> InlineQueue:
+    """Runs each job immediately inside the request, on the test's session and fakes, with
+    the worker's retry behaviour (RetryLater → try again, up to job_max_attempts)."""
+    deps = Deps(llm=fake_llm, store=vector_store)
+
+    def run(job_id: uuid.UUID) -> None:
+        for _ in range(get_settings().job_max_attempts):
+            try:
+                run_job(job_id, db, deps)
+                return
+            except RetryLater:
+                continue
+
+    return InlineQueue(run)
+
+
+@pytest.fixture
 def api(
     db: Session,
     fake_llm: FakeProvider,
     vector_store: QdrantStore,
+    inline_queue: InlineQueue,
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> Iterator[TestClient]:
     """TestClient whose requests use the test's `db` session, the fake model (no test can
-    reach Ollama by accident) and the test Qdrant collection."""
+    reach Ollama by accident), the test Qdrant collection, an inline job queue, a private
+    upload folder, and rate-limit counters no other test shares."""
+    settings = get_settings()
     # Hashed bag-of-words similarities run lower than real embeddings: a question sharing a
     # few words with a passage scores about 0.2-0.4, an unrelated one about 0.
-    monkeypatch.setattr(get_settings(), "rag_min_score", 0.1)
+    monkeypatch.setattr(settings, "rag_min_score", 0.1)
+    monkeypatch.setattr(settings, "upload_dir", tmp_path / "uploads")
+    monkeypatch.setattr(settings, "rate_limit_prefix", f"test-rl:{uuid.uuid4().hex}")
     app = create_app()
     app.dependency_overrides[get_db] = lambda: db
     app.dependency_overrides[get_llm] = lambda: fake_llm
     app.dependency_overrides[get_vector_store] = lambda: vector_store
+    app.dependency_overrides[get_job_queue] = lambda: inline_queue
     with TestClient(app, base_url=BASE_URL) as c:
         yield c
 
@@ -179,3 +205,28 @@ def upload_pdf(client: TestClient, pdf: bytes, name: str = "policy.pdf"):
         content=pdf,
         headers={"Content-Type": "application/pdf"},
     )
+
+
+def job_of(client: TestClient, response) -> dict:
+    """Follow a 202's Location header to the job."""
+    assert response.status_code == 202, response.text
+    job = client.get(response.headers["location"])
+    assert job.status_code == 200, job.text
+    return job.json()
+
+
+def import_csv(client: TestClient, csv_text: str, name: str = "test", key: str | None = None):
+    """Import through the job API and return the new dataset's id."""
+    job = job_of(client, upload(client, csv_text, name=name, key=key))
+    assert job["status"] == "succeeded", job
+    return job["result"]["dataset_id"]
+
+
+def index_pdf(client: TestClient, pdf: bytes, name: str = "policy.pdf") -> str:
+    """Upload and index a PDF through the job API; return the document id."""
+    response = upload_pdf(client, pdf, name)
+    if response.status_code == 200:  # already indexed
+        return response.json()["id"]
+    job = job_of(client, response)
+    assert job["status"] == "succeeded", job
+    return job["result"]["document_id"]

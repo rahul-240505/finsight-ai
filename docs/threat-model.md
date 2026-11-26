@@ -13,10 +13,10 @@ Browser ↔ API (HTTP) · API ↔ PostgreSQL / Redis / Qdrant (localhost only) �
 ### `POST /api/v1/auth/register`, `POST /api/v1/auth/login`
 | Threat | Mitigation | Gap |
 | --- | --- | --- |
-| **S**poofing: password guessing | Argon2id hashing; 12–128 character passwords | No rate limit yet (planned with Redis limits) |
+| **S**poofing: password guessing | Argon2id hashing; 12–128 character passwords; login limited to 10 attempts / 5 min per email and 30 / min per client IP (429 + Retry-After) | Limits fail open while Redis is down |
 | **I**nfo disclosure: account enumeration via login | Same message and one Argon2 verify for unknown emails and wrong passwords | Registration returns 409 for an existing email |
 | **I**nfo disclosure: credentials in responses/logs | Validation errors never echo input values; password hash never serialised | — |
-| **D**oS: huge passwords | 128-character cap before hashing | No request rate limit yet |
+| **D**oS: huge passwords | 128-character cap before hashing; login rate limits | — |
 
 ### Session cookie (all authenticated routes)
 | Threat | Mitigation | Gap |
@@ -34,7 +34,7 @@ Browser ↔ API (HTTP) · API ↔ PostgreSQL / Redis / Qdrant (localhost only) �
 ### `POST /api/v1/datasets`, `POST /api/v1/datasets/preview` (CSV upload)
 | Threat | Mitigation | Gap |
 | --- | --- | --- |
-| **D**oS: huge or endless upload | 100 MB cap enforced while streaming (and on Content-Length); 1M row cap; `text/csv` only | Synchronous import holds a worker for ~10-20 s per 500k rows; no upload rate limit yet |
+| **D**oS: huge or endless upload | 100 MB cap enforced while streaming (and on Content-Length); 1M row cap; `text/csv` only; 20 uploads / min per user; parsing runs in the worker with a 900 s limit | Upload bodies are buffered in API memory before being written to disk |
 | **T**ampering: malformed or hostile data | Every row validated (types, ranges, ISO currency, timezone-aware dates, lengths, control characters); all-or-nothing; DB CHECK/UNIQUE/composite FK as a second layer | Values starting with `=`, `+`, `-`, `@` are stored as-is; they must be escaped if CSV export is added |
 | **T**ampering: duplicate import on retry | Required Idempotency-Key (stored with request fingerprint, same transaction); per-owner file hash | Idempotency records are never expired yet |
 | **I**nfo disclosure: other users' transactions | Owner filter in every transaction and analytics query; composite FK keeps row owner = dataset owner | — |
@@ -44,18 +44,18 @@ Browser ↔ API (HTTP) · API ↔ PostgreSQL / Redis / Qdrant (localhost only) �
 | --- | --- | --- |
 | **T**ampering / **E**levation: malicious model file (joblib = pickle, runs code on load) | Loaded only if the path stays inside `MODEL_DIR` and its SHA-256 matches `model_versions`; model files are created only by the training script | Anyone who can write both the file and the database row can still swap a model |
 | **I**nfo disclosure: other users' scores | Owner filter on every query; scoring requires owning the dataset (404 otherwise) | — |
-| **D**oS: scoring large datasets | Requires `dataset:write`; one dataset per request | Synchronous (~21 s per 500k rows); no rate limit yet |
+| **D**oS: scoring large datasets | Requires `dataset:write`; one dataset per request; 10 / min per user; runs in the worker (900 s limit); a dataset already being scored joins that job | — |
 | Misuse: score treated as a fraud verdict | Wording is "unusual / flagged for review"; reasons describe inputs; known limitations documented (cold start, large-amount under-ranking) | — |
 
 ### `POST /api/v1/documents` (PDF upload) and `/api/v1/documents*`
 | Threat | Mitigation | Gap |
 | --- | --- | --- |
-| **T**ampering: malformed or hostile PDF | `%PDF-` header check; 20 MB cap enforced while streaming; 200-page cap before extraction; encrypted and image-only files rejected; parser errors return one generic 422 | pypdf runs in the API process with no CPU timeout; a crafted file could still be slow (moves to the worker with a job timeout) |
+| **T**ampering: malformed or hostile PDF | `%PDF-` header check; 20 MB cap enforced while streaming; 200-page cap before extraction; encrypted and image-only files rejected; parser errors return one generic 422 | pypdf runs in a forked worker process killed after 300 s |
 | **T**ampering: control characters / NUL bytes in text | Text is NFKC-normalised and control characters removed before storage | — |
 | **I**nfo disclosure: other users' documents (IDOR) | Ownership filter in every query; foreign IDs return 404; the same file uploaded by two users is two separate documents | — |
 | **I**nfo disclosure: deleted text still searchable | Postgres rows are deleted first; search results are joined back to live chunk rows, so leftover vectors can never return text | If Qdrant is down during delete, its vectors stay until a cleanup job (planned) |
 | **E**levation: viewer uploads or deletes | `document:write` required (analyst, admin) | — |
-| **D**oS: many large uploads | Size and page caps | No rate limit yet; indexing is synchronous |
+| **D**oS: many large uploads | Size and page caps; 20 uploads / min per user; indexing runs in the worker with a 300 s limit (also bounds a slow, hostile PDF) | — |
 
 ### `POST /api/v1/answers` (questions about documents)
 | Threat | Mitigation | Gap |
@@ -64,8 +64,19 @@ Browser ↔ API (HTTP) · API ↔ PostgreSQL / Redis / Qdrant (localhost only) �
 | **T**ampering: prompt injection inside a document | Passages are fenced in `<source>` blocks and any `<source`/`</source` text inside them is removed; the system prompt says to treat sources as information only; answers without a valid citation are not shown; retrieved text cannot change the user, filters or tools | A model can still be persuaded to write misleading text *with* a valid citation; the citation lets a reader check it (see docs/evaluation.md) |
 | **R**epudiation / audit | Logs record model name, latency and token counts per call, never prompt or document text | No per-question audit table yet |
 | **I**nfo disclosure: hallucinated answers | Relevance gate (no model call when the best passage is weak); citations must point at a passage that was sent; "not enough evidence" otherwise | Citation correctness is measured, not guaranteed |
-| **D**oS: expensive model calls | Question ≤ 1000 characters; `top_k` ≤ 10; answer ≤ 400 tokens; 120 s model timeout | No per-user rate limit yet |
+| **D**oS: expensive model calls | Question ≤ 1000 characters; `top_k` ≤ 10; answer ≤ 400 tokens; 120 s model timeout; 30 questions / min per user | — |
 | **T**ampering: broken model output | Embeddings that are all-zero, non-finite or the wrong size are rejected (503), never stored | — |
+
+### `/api/v1/jobs*` and the background worker
+| Threat | Mitigation | Gap |
+| --- | --- | --- |
+| **I**nfo disclosure: reading another user's job | Owner filter on every query; foreign ids → 404; job bodies never expose internal payloads (file names) | — |
+| **T**ampering: payload pointing at arbitrary files | The worker opens only generated names (`<uuid>.csv/pdf`) inside `UPLOAD_DIR`; files are 0600 in a 0700 folder and deleted when the job ends | — |
+| **I**nfo disclosure: error details | Job errors store a safe code and message; unexpected exceptions become `internal_error` with details only in logs | — |
+| **R**epudiation / audit | Every job records owner, kind, attempts and timestamps; the worker logs start and finish per job id | No per-step audit trail yet |
+| **D**oS: duplicate or retried submissions | Partial unique index lets only one active job per (owner, kind, content/dataset); Idempotency-Key replays imports | — |
+| **D**oS: lost or stuck jobs | Job state in Postgres; start-up sweep and `app.cli requeue` re-deliver queued and stale running jobs; conditional claim prevents double execution | A stuck job waits for the stale limit (30 min by default) |
+| **E**levation: job runs after the owner is disabled | The runner reloads the owner and fails the job if disabled or deleted | — |
 
 ### `PATCH /api/v1/users/{id}/role`
 | Threat | Mitigation | Gap |

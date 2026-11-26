@@ -5,19 +5,24 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
-from fastapi.concurrency import run_in_threadpool
+from fastapi import APIRouter, Depends, Query, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from app.api.deps import DbSession, require_permission
+from app.api.v1.jobs import accepted
 from app.core.permissions import Permission
+from app.core.rate_limit import per_user
 from app.db.models import User
+from app.modules.jobs.schemas import JobOut
 from app.modules.ml import service
+from app.worker.queue import JobQueue, enqueue_or_leave_queued, get_job_queue
 
 router = APIRouter(tags=["risk"])
 
 Reader = Annotated[User, Depends(require_permission(Permission.DATASET_READ))]
 Writer = Annotated[User, Depends(require_permission(Permission.DATASET_WRITE))]
+Queue = Annotated[JobQueue, Depends(get_job_queue)]
 
 
 class ScoreRequest(BaseModel):
@@ -55,11 +60,19 @@ class RiskOut(BaseModel):
     scored_at: datetime
 
 
-@router.post("/risk-assessments")
-async def score_dataset(body: ScoreRequest, db: DbSession, user: Writer) -> ScoreResult:
-    """Score every transaction in a dataset with the active model (replaces earlier scores)."""
-    result = await run_in_threadpool(service.score_dataset, db, user, body.dataset_id)
-    return ScoreResult(**result)
+@router.post(
+    "/risk-assessments",
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(per_user("scoring"))],
+    responses={202: {"model": JobOut, "description": "Scoring queued; result is a ScoreResult"}},
+)
+def score_dataset(body: ScoreRequest, db: DbSession, user: Writer, queue: Queue) -> JSONResponse:
+    """Queue scoring of every transaction in a dataset with the active model (replaces
+    earlier scores). A dataset already being scored returns that job instead of a new one."""
+    created = service.start_scoring(db, user, body.dataset_id)
+    if created.created:
+        enqueue_or_leave_queued(queue, created.job)
+    return accepted(created.job)
 
 
 @router.get("/risk-assessments")

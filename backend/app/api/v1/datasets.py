@@ -13,17 +13,22 @@ from fastapi.responses import JSONResponse
 
 from app.api.deps import DbSession, require_permission
 from app.api.uploads import read_body
+from app.api.v1.jobs import accepted
 from app.core.config import get_settings
 from app.core.permissions import Permission
+from app.core.rate_limit import per_user
 from app.db.models import User
 from app.modules.datasets import service
 from app.modules.datasets.schemas import DatasetOut
 from app.modules.idempotency import service as idem
+from app.modules.jobs.schemas import JobOut
+from app.worker.queue import JobQueue, get_job_queue
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
 
 Reader = Annotated[User, Depends(require_permission(Permission.DATASET_READ))]
 Writer = Annotated[User, Depends(require_permission(Permission.DATASET_WRITE))]
+Queue = Annotated[JobQueue, Depends(get_job_queue)]
 CSV_TYPES = {"text/csv", "application/csv"}
 
 
@@ -31,7 +36,7 @@ async def read_csv_body(request: Request) -> bytes:
     return await read_body(request, CSV_TYPES, get_settings().max_upload_bytes)
 
 
-@router.post("/preview")
+@router.post("/preview", dependencies=[Depends(per_user("upload"))])
 async def preview_import(request: Request, _: Writer) -> dict:
     """Check a CSV without saving anything: row counts, the first 50 errors, sample rows."""
     data = await read_csv_body(request)
@@ -40,29 +45,35 @@ async def preview_import(request: Request, _: Writer) -> dict:
 
 @router.post(
     "",
-    status_code=status.HTTP_201_CREATED,
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(per_user("upload"))],
     responses={
-        201: {"model": DatasetOut},
+        202: {"model": JobOut, "description": "Import queued; follow the Location header"},
         409: {"description": "This file was already imported"},
-        422: {"description": "Invalid CSV or reused Idempotency-Key"},
+        422: {"description": "Reused Idempotency-Key"},
+        429: {"description": "Too many uploads"},
     },
 )
 async def import_dataset(
     request: Request,
     db: DbSession,
     user: Writer,
+    queue: Queue,
     name: Annotated[str, Query(min_length=1, max_length=200)],
 ) -> JSONResponse:
-    """Import a transaction CSV, all-or-nothing. Requires an `Idempotency-Key` header:
-    retrying with the same key and file returns the original result (header
-    `Idempotent-Replayed: true`) instead of importing twice."""
+    """Queue a transaction CSV for all-or-nothing import. Requires an `Idempotency-Key`
+    header: retrying with the same key and file returns the original job (header
+    `Idempotent-Replayed: true`). Row errors appear in the job's `error` when it fails."""
     key = idem.require_key(request)
     data = await read_csv_body(request)
     request_hash = idem.fingerprint(request, data)
-    # Parsing and COPY are blocking work: run them off the event loop.
-    outcome = await run_in_threadpool(service.import_csv, db, user, name, data, key, request_hash)
+    outcome = await run_in_threadpool(
+        service.start_import, db, user, queue, name, data, key, request_hash
+    )
     headers = {"Idempotent-Replayed": "true"} if outcome.replayed else {}
-    return JSONResponse(outcome.body, outcome.status_code, headers=headers)
+    if outcome.status_code != status.HTTP_202_ACCEPTED:
+        return JSONResponse(outcome.body, outcome.status_code, headers=headers)
+    return accepted(outcome.body, headers)
 
 
 @router.get("")

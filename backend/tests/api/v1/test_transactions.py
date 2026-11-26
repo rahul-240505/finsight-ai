@@ -5,7 +5,7 @@ from collections.abc import Callable
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.conftest import login, make_csv, upload
+from tests.conftest import import_csv, login, make_csv
 
 pytestmark = pytest.mark.integration
 
@@ -14,9 +14,9 @@ pytestmark = pytest.mark.integration
 def loaded(api: TestClient, make_user: Callable) -> TestClient:
     """An analyst with 25 transactions (T0..T24) in USD and 3 in EUR (E0..E2)."""
     login(api, make_user())
-    assert upload(api, make_csv(25)).status_code == 201
+    assert import_csv(api, make_csv(25))
     eur = make_csv(3).replace(",USD,", ",EUR,").replace("\nT", "\nE")
-    assert upload(api, eur).status_code == 201
+    assert import_csv(api, eur)
     return api
 
 
