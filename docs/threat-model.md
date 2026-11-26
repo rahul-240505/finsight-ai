@@ -39,6 +39,14 @@ Browser ↔ API (HTTP) · API ↔ PostgreSQL / Redis / Qdrant (localhost only) �
 | **T**ampering: duplicate import on retry | Required Idempotency-Key (stored with request fingerprint, same transaction); per-owner file hash | Idempotency records are never expired yet |
 | **I**nfo disclosure: other users' transactions | Owner filter in every transaction and analytics query; composite FK keeps row owner = dataset owner | — |
 
+### `/api/v1/risk-assessments*`, `/api/v1/transactions/{id}/risk`
+| Threat | Mitigation | Gap |
+| --- | --- | --- |
+| **T**ampering / **E**levation: malicious model file (joblib = pickle, runs code on load) | Loaded only if the path stays inside `MODEL_DIR` and its SHA-256 matches `model_versions`; model files are created only by the training script | Anyone who can write both the file and the database row can still swap a model |
+| **I**nfo disclosure: other users' scores | Owner filter on every query; scoring requires owning the dataset (404 otherwise) | — |
+| **D**oS: scoring large datasets | Requires `dataset:write`; one dataset per request | Synchronous (~21 s per 500k rows); no rate limit yet |
+| Misuse: score treated as a fraud verdict | Wording is "unusual / flagged for review"; reasons describe inputs; known limitations documented (cold start, large-amount under-ranking) | — |
+
 ### `PATCH /api/v1/users/{id}/role`
 | Threat | Mitigation | Gap |
 | --- | --- | --- |

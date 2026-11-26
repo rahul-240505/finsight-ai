@@ -6,8 +6,10 @@ from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
+    Float,
     ForeignKey,
     ForeignKeyConstraint,
     Index,
@@ -15,6 +17,7 @@ from sqlalchemy import (
     Numeric,
     String,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -124,3 +127,59 @@ class IdempotencyRecord(TimestampMixin, Base):
     request_hash: Mapped[str] = mapped_column(String(64))
     status_code: Mapped[int | None] = mapped_column(Integer)
     response_body: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+
+
+class ModelVersion(TimestampMixin, Base):
+    """A trained model file plus everything needed to trust and reproduce it."""
+
+    __tablename__ = "model_versions"
+    __table_args__ = (
+        # At most one active version per model name; the database enforces it.
+        Index(
+            "uq_model_versions_active_name", "name", unique=True, postgresql_where=text("is_active")
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(100))  # e.g. "isolation_forest"
+    version: Mapped[str] = mapped_column(String(100), unique=True)
+    algorithm: Mapped[str] = mapped_column(String(100))
+    feature_names: Mapped[list[str]] = mapped_column(JSONB)
+    params: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    metrics: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    threshold: Mapped[float] = mapped_column(Float)  # risk_score >= threshold → flagged
+    training_data: Mapped[str] = mapped_column(String(500))  # dataset, seed, split description
+    artifact_path: Mapped[str] = mapped_column(String(500))  # relative to settings.model_dir
+    artifact_sha256: Mapped[str] = mapped_column(String(64))
+    is_active: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+
+
+class RiskAssessment(TimestampMixin, Base):
+    """One model's opinion of one transaction: a score, a flag and readable reasons.
+    "Flagged" means unusual and worth a human look, never "fraud"."""
+
+    __tablename__ = "risk_assessments"
+    __table_args__ = (
+        UniqueConstraint("transaction_id", "model_version_id", name="uq_risk_tx_model"),
+        # Review queue: one dataset's assessments, highest score first.
+        Index(
+            "ix_risk_owner_dataset_model_score",
+            "owner_id",
+            "dataset_id",
+            "model_version_id",
+            "risk_score",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    transaction_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("transactions.id", ondelete="CASCADE")
+    )
+    owner_id: Mapped[uuid.UUID] = mapped_column()
+    dataset_id: Mapped[uuid.UUID] = mapped_column()
+    model_version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("model_versions.id", ondelete="CASCADE")
+    )
+    risk_score: Mapped[float] = mapped_column(Float)
+    is_flagged: Mapped[bool] = mapped_column(Boolean)
+    reasons: Mapped[list[str]] = mapped_column(JSONB)

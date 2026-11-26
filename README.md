@@ -15,7 +15,7 @@ Runs entirely on your machine: no cloud services, no paid APIs. Uses synthetic a
 | Platform | Typed configuration, liveness and readiness probes, CI | ✅ Available |
 | Access control | Sign-in with server-side sessions, roles and permissions, per-user data ownership | ✅ Available |
 | Data | Validated, all-or-nothing, idempotent CSV import (500k rows); filtered, keyset-paginated transaction API; per-currency SQL summaries | ✅ Available |
-| Risk scoring | Isolation Forest anomaly scores with reasons; versioned models | 🛠️ Planned |
+| Risk scoring | Isolation Forest anomaly scores with plain-language reasons; versioned, hash-verified models; review queue | ✅ Available |
 | Document Q&A | RAG over policy PDFs with page citations and an "insufficient evidence" fallback | 🛠️ Planned |
 | Background jobs | Worker queue for slow tasks; rate limiting | 🛠️ Planned |
 | Investigation agent | Read-only allowlisted tools, step limits, audit log, human approval | 🛠️ Planned |
@@ -36,6 +36,7 @@ flowchart LR
 - **Modular monolith:** one FastAPI service with internal modules (router → service → repository) plus one background worker. See [ADR-001](docs/decisions/ADR-001-modular-monolith.md).
 - **Local models:** `qwen3.5:4b` for chat and tool calls, `nomic-embed-text` for embeddings, served by Ollama behind a provider interface. See [ADR-003](docs/decisions/ADR-003-local-llm.md).
 - **Security by default:** Argon2id password hashing, HttpOnly/Secure/SameSite session cookies, CSRF origin checks, role-based permissions plus per-object ownership (other users' data returns 404). See [ADR-005](docs/decisions/ADR-005-session-auth.md), [ADR-006](docs/decisions/ADR-006-rbac-ownership.md) and the [threat model](docs/threat-model.md).
+- **Measured ML:** leak-free per-account features, time-based train/validation/test split, baselines and bootstrap confidence intervals. See [ADR-011](docs/decisions/ADR-011-anomaly-scoring.md).
 - **Safe imports:** all-or-nothing CSV imports with required idempotency keys, duplicate-file detection and bulk `COPY`. See [ADR-008](docs/decisions/ADR-008-imports-idempotency.md).
 - **Data stores in Docker:** PostgreSQL 17, Redis 7.4 and Qdrant 1.15 via Docker Compose. The API runs on the host.
 
@@ -81,6 +82,9 @@ Interactive API docs: <http://localhost:8000/docs>
 | `DELETE` | `/api/v1/datasets/{id}` | `dataset:write`, owner only (removes its transactions) |
 | `GET` | `/api/v1/transactions` | `dataset:read`: filters `dataset_id, account_id, category, date_from, date_to, min_amount, max_amount`; keyset pagination via `cursor` |
 | `GET` | `/api/v1/transactions/{id}` | `dataset:read`, owner only |
+| `POST` | `/api/v1/risk-assessments` | `dataset:write`: score a dataset with the active model (`{"dataset_id": …}`) |
+| `GET` | `/api/v1/risk-assessments?dataset_id=…` | `dataset:read`: review queue, highest risk first, with reasons |
+| `GET` | `/api/v1/transactions/{id}/risk` | `dataset:read`: one transaction's score and reasons |
 | `GET` | `/api/v1/analytics/summary` | `dataset:read`: totals per currency, by category, by month (same filters) |
 | `PATCH` | `/api/v1/users/{id}/role` | `user:manage` (admin) |
 
@@ -98,6 +102,16 @@ curl -b jar -X POST "localhost:8000/api/v1/datasets?name=synthetic" \
 ```
 
 CSV columns: `transaction_id, account_id, timestamp` (ISO 8601 with timezone), `amount` (max 2 decimals), `currency` (ISO 4217), `merchant, category`.
+
+Train and activate the risk model, then score a dataset:
+
+```bash
+cd backend
+PYTHONPATH=. uv run python ../ml/training/train_isolation_forest.py \
+    --csv ../data/transactions_500k.csv --labels ../data/labels_500k.csv --register
+curl -b jar -X POST localhost:8000/api/v1/risk-assessments \
+    -H "Content-Type: application/json" -d '{"dataset_id": "<id>"}'
+```
 
 Optional, for AI features:
 
@@ -123,6 +137,7 @@ CI runs lint and the full test suite against real PostgreSQL, Redis and Qdrant s
 ```
 backend/        FastAPI app (app/), Alembic migrations (alembic/) and tests (tests/)
 infra/local/    Docker Compose for the data stores
+ml/             Model training (training/) and experiments (experiments/); artifacts are git-ignored
 scripts/        Synthetic data generator, query benchmark, model smoke test
 docs/           Architecture decisions, threat model and benchmark log
 ```
@@ -133,7 +148,10 @@ All numbers come from [docs/evaluation.md](docs/evaluation.md) and were measured
 
 | Measurement | Result |
 | --- | --- |
-| Test suite | 83 passed (39 unit, 44 integration against PostgreSQL), median 7.18 s |
+| Test suite | 105 passed (unit + integration against PostgreSQL), median 8.90 s |
+| Anomaly scoring, test month (synthetic, labelled injections) | PR-AUC 0.658 [95% CI 0.614-0.700] vs 0.202 best single rule, 0.011 random; precision 0.71, recall 0.55 |
+| Supervised fraud model, public card dataset (75 test frauds) | Logistic regression PR-AUC 0.744 [0.630-0.852]; gradient boosting 0.753, difference not significant |
+| Scoring 500k transactions via API | 20.6 s median (3 runs) |
 | CSV import, 500k rows via API | 10.8 s median without query indexes · 20.5 s with them (3 runs each) |
 | Newest-page query, 500k rows | 43.3 ms → 0.023 ms after indexing (EXPLAIN ANALYZE, median of 5) |
 | Deep page at row 250,000 | OFFSET 21.6 ms vs keyset 0.021 ms (both indexed) |
@@ -147,7 +165,7 @@ All numbers come from [docs/evaluation.md](docs/evaluation.md) and were measured
 - [x] Platform foundation: config, health/readiness probes, CI
 - [x] Authentication, roles and ownership checks
 - [x] CSV import, transaction API, SQL performance tuning
-- [ ] Anomaly scoring and model evaluation
+- [x] Anomaly scoring and model evaluation
 - [ ] Document Q&A with citations
 - [ ] Background jobs and rate limiting
 - [ ] Investigation agent with human approval

@@ -97,3 +97,52 @@ Every benchmark and evaluation result for FinSight AI, with the exact command an
 - Command: `cd backend && uv run pytest` (3 runs); `-m "not integration"`; `-m integration`
 - Result: 83 passed, 0 failed, 0 skipped (39 unit, 44 integration). Wall time 7.18 / 6.96 / 7.19 s, median 7.18 s.
 - Notes: covers row validation rules, all-or-nothing import, idempotent replay, key reuse (422), duplicate file (409), size/type limits (413/415), preview, cascade delete, composite-FK owner check, keyset pagination, filters, per-currency summary, owner isolation, and 11 private routes → 401.
+
+### 2026-11-26 · Anomaly scoring: Isolation Forest vs baselines (synthetic, labelled injections)
+- Milestone: ML scoring · Version: 0.4.0 (uncommitted, on top of the data & SQL commit) · model `iforest-20261126145149`
+- Dataset: `transactions_500k.csv` (seed 42) with `labels_500k.csv` (5,014 injected anomaly rows, 1.0%). Time split: train 2025-01-01..09-30 (373,642 rows, 3,719 positives) · validation 10-01..11-30 (84,080 / 855) · test 12-01..12-31 (42,278 / 440)
+- Machine: i5-12500H, 15 GiB RAM (CPU only)
+- Command: `cd backend && PYTHONPATH=. uv run python ../ml/training/train_isolation_forest.py --csv ../data/transactions_500k.csv --labels ../data/labels_500k.csv --register`
+- Setup: 8 features, all computed from each account's *earlier* transactions only. IsolationForest(n_estimators=200, max_samples=256, random_state=42) fitted on train without labels. Threshold = max F1 on validation; test reported once. Model chosen by validation PR-AUC.
+- Result (test set):
+
+| Scorer | Val PR-AUC | Test PR-AUC (95% bootstrap CI) | ROC-AUC | Precision | Recall | F1 | Precision in top 1% |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Random | 0.0102 | 0.0110 [0.0097, 0.0130] | 0.507 | 0.011 | 0.216 | 0.021 | 0.012 |
+| Rule: amount_z | 0.2101 | 0.2015 [0.1661, 0.2400] | 0.848 | 0.485 | 0.182 | 0.265 | 0.232 |
+| **Isolation Forest (served)** | **0.6824** | **0.6581 [0.6144, 0.6998]** | 0.948 | 0.709 | 0.554 | 0.622 | 0.642 |
+| Hybrid (max of forest and amount_z percentiles) | 0.6147 | 0.5687 [0.5213, 0.6144] | 0.953 | 0.666 | 0.543 | 0.598 | 0.602 |
+
+- Isolation Forest test confusion at threshold: TP 244 · FP 100 · FN 196; flag rate 0.81%. Recall by type (test): burst 0.717 · high_risk_merchant 0.404 · large_amount 0.327 · night_unfamiliar 0.143. The amount rule catches large_amount at 0.959 but bursts at 0.0.
+- Fit 0.76-0.82 s; feature build 0.41 s for 500k rows (2.3 s before the datetime fix below).
+- Notes: the hybrid was designed after viewing the Isolation Forest's per-type test results (the same weakness is visible on validation: large_amount recall 0.475). It was then selected *against* by the pre-set rule (validation PR-AUC) and is not served. Labels come from the same generator as the data, so these numbers measure detection of these four injected patterns, not real-world fraud detection.
+
+### 2026-11-26 · Risk scoring through the API (500k rows)
+- Milestone: ML scoring · Version: 0.4.0 · model `iforest-20261126145149`
+- Dataset: demo user's 500k-row dataset (same file as above)
+- Command: `curl -X POST /api/v1/risk-assessments -d '{"dataset_id": …}'` ×3 (re-scoring replaces previous scores); review queue `GET /api/v1/risk-assessments?dataset_id=…&limit=50` ×3
+- Result: scoring 18.84 / 20.64 / 22.98 s (median 20.64 s); 500,000 scored, 7,904 flagged (1.58%). Review queue page 0.013-0.015 s (earlier model version, same query). Train/serve consistency: flags served for December rows = 344 (TP 244, FP 100), identical to the training script's test result.
+- Flag rate by month (served): Jan 8.30% · Feb 1.41% · Mar 1.16% · Apr 1.04% · May-Dec 0.81-0.92%.
+- Notes: **cold start**: accounts with little history are over-flagged (January). Not visible in the December test set. Planned fix: an explicit "insufficient history" state instead of a flag, evaluated on validation first.
+
+### 2026-11-26 · Supervised fraud classification (public credit-card dataset)
+- Milestone: ML scoring · experiment, not served
+- Dataset: OpenML 1597 (284,807 card transactions, 492 frauds = 0.173%). OpenML's copy has no Time column; split by original row order: train 60% (360 frauds) · validation 20% (57) · test 20% (75)
+- Machine: i5-12500H, 15 GiB RAM (CPU only)
+- Command: `cd backend && PYTHONPATH=. uv run python ../ml/experiments/creditcard_supervised.py`
+- Setup: V1..V28 + Amount. Logistic regression (StandardScaler in a Pipeline, class_weight="balanced") and HistGradientBoosting (class_weight="balanced", random_state=42). Threshold = max F1 on validation; test once. 1,000-sample paired bootstrap on test.
+- Result (test):
+
+| Model | Val PR-AUC | Test PR-AUC (95% CI) | ROC-AUC | Precision | Recall | TP / FP / FN | Fit time |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Random | — | 0.0012 | 0.463 | 0.001 | 0.400 | 30 / 23,775 / 45 | — |
+| Rule: Amount | — | 0.0014 | 0.382 | 0.003 | 0.040 | 3 / 1,022 / 72 | — |
+| Logistic regression | 0.7725 | 0.7438 [0.6302, 0.8521] | 0.982 | 0.926 | 0.667 | 50 / 4 / 25 | 0.71 s |
+| Gradient boosting | 0.7579 | 0.7529 [0.6509, 0.8396] | 0.972 | 0.877 | 0.667 | 50 / 7 / 25 | 10.95 s |
+
+- Gradient boosting − logistic regression, test PR-AUC: 95% CI [-0.0714, +0.0875] → no detectable difference with 75 test frauds; logistic regression is simpler, 15× faster to fit and better on validation.
+- Notes: large amounts are *not* a fraud signal here (Amount rule ≈ random). Dataset download from OpenML took ~11 minutes (66 MB cache in `data/openml`, git-ignored).
+
+### 2026-11-26 · Test suite after ML milestone
+- Version: 0.4.0 · Command: `cd backend && uv run pytest` (3 runs)
+- Result: 105 passed, 0 failed, 0 skipped. Wall time 8.90 / 8.94 / 8.87 s (median 8.90 s), final run after all Phase 3 changes.

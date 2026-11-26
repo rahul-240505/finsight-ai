@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     max_upload_bytes: int = Field(default=100 * 1024 * 1024, gt=0)
     max_import_rows: int = Field(default=1_000_000, gt=0)
 
+    # Trained model files (git-ignored). model_versions stores paths relative to this folder.
+    model_dir: Path = REPO_ROOT / "ml" / "artifacts"
+
 
 @lru_cache
 def get_settings() -> Settings:
