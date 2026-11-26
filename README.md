@@ -13,7 +13,7 @@ Runs entirely on your machine: no cloud services, no paid APIs. Uses synthetic a
 | Area | Capability | Status |
 | --- | --- | --- |
 | Platform | Typed configuration, liveness and readiness probes, CI | ✅ Available |
-| Access control | Sign-in, roles, per-user data ownership | 🛠️ Planned |
+| Access control | Sign-in with server-side sessions, roles and permissions, per-user data ownership | ✅ Available |
 | Data | Validated, idempotent CSV import; filtered and paginated transaction API; SQL summaries | 🛠️ Planned |
 | Risk scoring | Isolation Forest anomaly scores with reasons; versioned models | 🛠️ Planned |
 | Document Q&A | RAG over policy PDFs with page citations and an "insufficient evidence" fallback | 🛠️ Planned |
@@ -35,6 +35,7 @@ flowchart LR
 
 - **Modular monolith:** one FastAPI service with internal modules (router → service → repository) plus one background worker. See [ADR-001](docs/decisions/ADR-001-modular-monolith.md).
 - **Local models:** `qwen3.5:4b` for chat and tool calls, `nomic-embed-text` for embeddings, served by Ollama behind a provider interface. See [ADR-003](docs/decisions/ADR-003-local-llm.md).
+- **Security by default:** Argon2id password hashing, HttpOnly/Secure/SameSite session cookies, CSRF origin checks, role-based permissions plus per-object ownership (other users' data returns 404). See [ADR-005](docs/decisions/ADR-005-session-auth.md), [ADR-006](docs/decisions/ADR-006-rbac-ownership.md) and the [threat model](docs/threat-model.md).
 - **Data stores in Docker:** PostgreSQL 17, Redis 7.4 and Qdrant 1.15 via Docker Compose. The API runs on the host.
 
 ## Quick start
@@ -49,9 +50,11 @@ cp .env.example .env            # then set POSTGRES_PASSWORD and DATABASE_URL
 # Start PostgreSQL, Redis and Qdrant
 docker compose --env-file .env -f infra/local/docker-compose.yml up -d
 
-# Run the API
+# Create the schema and an admin account, then run the API
 cd backend
 uv sync
+uv run alembic upgrade head
+uv run python -m app.cli create-user admin@example.com --role admin
 uv run uvicorn app.main:app --reload
 ```
 
@@ -64,6 +67,19 @@ curl localhost:8000/ready       # 200 when all data stores respond, else 503
 
 Interactive API docs: <http://localhost:8000/docs>
 
+### API overview
+
+| Method | Path | Access |
+| --- | --- | --- |
+| `POST` | `/api/v1/auth/register` | Public (creates an analyst) |
+| `POST` | `/api/v1/auth/login` · `/logout` | Public · signed in |
+| `GET` | `/api/v1/auth/me` | Signed in |
+| `GET` `POST` | `/api/v1/datasets` | `dataset:read` · `dataset:write` |
+| `GET` `DELETE` | `/api/v1/datasets/{id}` | Owner only (`dataset:read` · `dataset:write`) |
+| `PATCH` | `/api/v1/users/{id}/role` | `user:manage` (admin) |
+
+Roles: `viewer` (read), `analyst` (read and write), `admin` (adds approvals and user management). Errors always use `{"error": {"code", "message", "request_id"}}`.
+
 Optional, for AI features:
 
 ```bash
@@ -75,7 +91,8 @@ ollama pull nomic-embed-text
 
 ```bash
 cd backend
-uv run pytest                       # all tests (integration tests need the Compose stores)
+uv run pytest                       # all tests (integration tests need the Compose stores;
+                                    # they use a separate <db>_test database)
 uv run pytest -m "not integration"  # unit tests only
 uv run ruff check . && uv run ruff format --check .
 ```
@@ -85,10 +102,10 @@ CI runs lint and the full test suite against real PostgreSQL, Redis and Qdrant s
 ## Project layout
 
 ```
-backend/        FastAPI app (app/) and tests (tests/)
+backend/        FastAPI app (app/), Alembic migrations (alembic/) and tests (tests/)
 infra/local/    Docker Compose for the data stores
 scripts/        Utility scripts (model smoke test)
-docs/           Architecture decisions and benchmark log
+docs/           Architecture decisions, threat model and benchmark log
 ```
 
 ## Results
@@ -97,7 +114,8 @@ All numbers come from [docs/evaluation.md](docs/evaluation.md) and were measured
 
 | Measurement | Result |
 | --- | --- |
-| Test suite | 8 passed (unit + integration) |
+| Test suite | 41 passed (17 unit, 24 integration), median 3.66 s over 3 runs |
+| Access control | Anonymous → 401 on all 7 private routes; cross-user read/delete → 404; cross-site POST → 403 |
 | Readiness probe with Redis stopped | HTTP 503 in 0.047 s; recovers to 200 without restart |
 | `qwen3.5:4b` generation speed | 49.8 tokens/s median, 100% on GPU |
 | `nomic-embed-text` query embedding | 768 dimensions, 10 ms median |
@@ -105,7 +123,7 @@ All numbers come from [docs/evaluation.md](docs/evaluation.md) and were measured
 ## Roadmap
 
 - [x] Platform foundation: config, health/readiness probes, CI
-- [ ] Authentication, roles and ownership checks
+- [x] Authentication, roles and ownership checks
 - [ ] CSV import, transaction API, SQL performance tuning
 - [ ] Anomaly scoring and model evaluation
 - [ ] Document Q&A with citations

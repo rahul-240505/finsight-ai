@@ -30,6 +30,12 @@ class Settings(BaseSettings):
     ollama_embed_model: str = "nomic-embed-text"
     ready_timeout_seconds: float = Field(default=2.0, gt=0, le=10)
 
+    # Auth (ADR-005): opaque session token in an HttpOnly, Secure, SameSite=Lax cookie.
+    session_cookie_name: str = "finsight_session"
+    session_ttl_hours: int = Field(default=12, gt=0, le=24 * 30)
+    # Browser origins allowed to send state-changing requests (CSRF Origin check).
+    allowed_origins: list[str] = ["http://localhost:5173"]
+
 
 @lru_cache
 def get_settings() -> Settings:
