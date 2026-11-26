@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     # Browser origins allowed to send state-changing requests (CSRF Origin check).
     allowed_origins: list[str] = ["http://localhost:5173"]
 
+    # CSV import limits (checked before parsing; protects memory and the database).
+    max_upload_bytes: int = Field(default=100 * 1024 * 1024, gt=0)
+    max_import_rows: int = Field(default=1_000_000, gt=0)
+
 
 @lru_cache
 def get_settings() -> Settings:

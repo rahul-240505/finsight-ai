@@ -31,6 +31,14 @@ Browser ↔ API (HTTP) · API ↔ PostgreSQL / Redis / Qdrant (localhost only) �
 | **I**nfo disclosure / **T**ampering: IDOR | Owner filter in every query; foreign and missing IDs both 404; cross-user tests | — |
 | **E**levation: viewer writes | `require_permission` on every route; route-inventory test for 401 | — |
 
+### `POST /api/v1/datasets`, `POST /api/v1/datasets/preview` (CSV upload)
+| Threat | Mitigation | Gap |
+| --- | --- | --- |
+| **D**oS: huge or endless upload | 100 MB cap enforced while streaming (and on Content-Length); 1M row cap; `text/csv` only | Synchronous import holds a worker for ~10-20 s per 500k rows; no upload rate limit yet |
+| **T**ampering: malformed or hostile data | Every row validated (types, ranges, ISO currency, timezone-aware dates, lengths, control characters); all-or-nothing; DB CHECK/UNIQUE/composite FK as a second layer | Values starting with `=`, `+`, `-`, `@` are stored as-is; they must be escaped if CSV export is added |
+| **T**ampering: duplicate import on retry | Required Idempotency-Key (stored with request fingerprint, same transaction); per-owner file hash | Idempotency records are never expired yet |
+| **I**nfo disclosure: other users' transactions | Owner filter in every transaction and analytics query; composite FK keeps row owner = dataset owner | — |
+
 ### `PATCH /api/v1/users/{id}/role`
 | Threat | Mitigation | Gap |
 | --- | --- | --- |

@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from app.core.permissions import Role
 from app.main import create_app
-from tests.conftest import BASE_URL, login
+from tests.conftest import BASE_URL, login, make_csv, upload
 
 pytestmark = pytest.mark.integration
 
@@ -29,12 +29,14 @@ PRIVATE_ROUTES = [r for r in api_routes() if r not in PUBLIC_ROUTES]
 def test_route_inventory_is_not_empty() -> None:
     """Guards the parametrized test below: an empty list would make it silently skip."""
     assert PUBLIC_ROUTES <= set(api_routes())
-    assert len(PRIVATE_ROUTES) >= 7
+    assert len(PRIVATE_ROUTES) >= 11
 
 
 @pytest.mark.parametrize(("method", "path"), PRIVATE_ROUTES)
 def test_every_private_route_needs_login(api: TestClient, method: str, path: str) -> None:
-    url = path.replace("{dataset_id}", SAMPLE_ID).replace("{user_id}", SAMPLE_ID)
+    url = path
+    for param in ("{dataset_id}", "{user_id}", "{transaction_id}"):
+        url = url.replace(param, SAMPLE_ID)
     response = api.request(method, url, json={})
     assert response.status_code == 401, f"{method} {path} -> {response.status_code}"
 
@@ -42,7 +44,7 @@ def test_every_private_route_needs_login(api: TestClient, method: str, path: str
 def test_viewer_can_read_but_not_write(api: TestClient, make_user: Callable) -> None:
     login(api, make_user(Role.VIEWER))
     assert api.get("/api/v1/datasets").status_code == 200
-    assert api.post("/api/v1/datasets", json={"name": "x"}).status_code == 403
+    assert upload(api, make_csv()).status_code == 403
 
 
 def test_only_admin_can_change_roles_and_change_ends_sessions(
@@ -67,7 +69,7 @@ def test_user_cannot_see_or_delete_another_users_dataset(
 ) -> None:
     owner, other = make_user(), make_user()
     login(api, owner)
-    dataset_id = api.post("/api/v1/datasets", json={"name": "Q3 cards"}).json()["id"]
+    dataset_id = upload(api, make_csv(), name="Q3 cards").json()["id"]
 
     login(api, other)
     assert api.get(f"/api/v1/datasets/{dataset_id}").status_code == 404
@@ -83,7 +85,7 @@ def test_foreign_and_missing_ids_give_the_same_response(
 ) -> None:
     owner, other = make_user(), make_user()
     login(api, owner)
-    dataset_id = api.post("/api/v1/datasets", json={"name": "mine"}).json()["id"]
+    dataset_id = upload(api, make_csv(), name="mine").json()["id"]
     login(api, other)
     foreign = api.get(f"/api/v1/datasets/{dataset_id}")
     missing = api.get(f"/api/v1/datasets/{SAMPLE_ID}")
@@ -94,7 +96,7 @@ def test_foreign_and_missing_ids_give_the_same_response(
 def test_list_is_paginated_and_capped(api: TestClient, make_user: Callable) -> None:
     login(api, make_user())
     for i in range(3):
-        api.post("/api/v1/datasets", json={"name": f"d{i}"})
+        assert upload(api, make_csv(start=i * 10), name=f"d{i}").status_code == 201
     first = api.get("/api/v1/datasets", params={"limit": 2}).json()
     second = api.get("/api/v1/datasets", params={"limit": 2, "offset": 2}).json()
     # Pages don't overlap and together cover everything. (All three rows share created_at here,

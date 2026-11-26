@@ -12,7 +12,8 @@ services:
     ports:
       - "127.0.0.1:5433:5432"   # host Postgres already uses 5432
     volumes:
-      - pg_data:/var/lib/postgresql/data
+      # Named volume by default; set POSTGRES_DATA_DIR in .env to keep the data on another disk.
+      - ${POSTGRES_DATA_DIR:-pg_data}:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s

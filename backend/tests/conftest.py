@@ -5,6 +5,7 @@ Unit tests use `client` (no database). Integration tests use `api` + `db`: a sep
 rolled back afterwards, so tests never see each other's data.
 """
 
+import uuid
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
@@ -101,3 +102,24 @@ def login(client: TestClient, user: User) -> TestClient:
     response = client.post("/api/v1/auth/login", json={"email": user.email, "password": PASSWORD})
     assert response.status_code == 200, response.text
     return client
+
+
+CSV_HEADER = "transaction_id,account_id,timestamp,amount,currency,merchant,category\n"
+
+
+def make_csv(rows: int = 3, start: int = 0, currency: str = "USD") -> str:
+    """A small valid CSV: one row per day of January 2025, amounts 10.00, 11.00, ..."""
+    lines = [
+        f"T{i},ACC-{i % 2},2025-01-{i % 28 + 1:02d}T12:00:00Z,{10 + i}.00,{currency},"
+        f"Shop {i % 3},{'groceries' if i % 2 else 'travel'}\n"
+        for i in range(start, start + rows)
+    ]
+    return CSV_HEADER + "".join(lines)
+
+
+def upload(client: TestClient, csv_text: str, name: str = "test", key: str | None = None):
+    """POST a CSV import. A unique Idempotency-Key is generated unless one is given."""
+    headers = {"Content-Type": "text/csv", "Idempotency-Key": key or str(uuid.uuid4())}
+    return client.post(
+        "/api/v1/datasets", params={"name": name}, content=csv_text.encode(), headers=headers
+    )

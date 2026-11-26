@@ -19,9 +19,10 @@ class AppError(Exception):
     code = "bad_request"
     message = "Bad request."
 
-    def __init__(self, message: str | None = None) -> None:
+    def __init__(self, message: str | None = None, **extra: object) -> None:
         super().__init__(message or self.message)
         self.message = message or self.message
+        self.extra = extra  # extra JSON fields for the error body (e.g. per-row errors)
 
 
 class Unauthorized(AppError):
@@ -42,6 +43,18 @@ class Conflict(AppError):
     status_code, code, message = 409, "conflict", "Conflict."
 
 
+class BadRequest(AppError):
+    status_code, code, message = 400, "bad_request", "Bad request."
+
+
+class PayloadTooLarge(AppError):
+    status_code, code, message = 413, "payload_too_large", "The upload is too large."
+
+
+class UnsupportedMediaType(AppError):
+    status_code, code, message = 415, "unsupported_media_type", "Unsupported content type."
+
+
 def error_body(request: Request, code: str, message: str, **extra: object) -> dict:
     request_id = getattr(request.state, "request_id", None)
     return {"error": {"code": code, "message": message, "request_id": request_id, **extra}}
@@ -50,7 +63,8 @@ def error_body(request: Request, code: str, message: str, **extra: object) -> di
 def install_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppError)
     async def app_error(request: Request, exc: AppError) -> JSONResponse:
-        return JSONResponse(error_body(request, exc.code, exc.message), exc.status_code)
+        body = error_body(request, exc.code, exc.message, **exc.extra)
+        return JSONResponse(body, exc.status_code)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
