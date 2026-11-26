@@ -6,7 +6,7 @@ STRIDE per entry point. Updated as features ship. Scope: local, single-machine d
 User credentials and sessions · transaction datasets · policy documents · scores and reports.
 
 ## Trust boundaries
-Browser ↔ API (HTTP) · API ↔ PostgreSQL / Redis / Qdrant (localhost only) · API ↔ Ollama (localhost).
+Browser ↔ web UI dev server (Vite, localhost) ↔ API (HTTP, same origin through the proxy) · API ↔ PostgreSQL / Redis / Qdrant (localhost only) · API ↔ Ollama (localhost).
 
 ## Entry points
 
@@ -85,8 +85,8 @@ Browser ↔ API (HTTP) · API ↔ PostgreSQL / Redis / Qdrant (localhost only) �
 | **E**levation: model widens its own scope | Five read-only tools, allowlisted; arguments validated by Pydantic (`extra="forbid"`, bounds, patterns); tools run as the requesting user through owner-scoped services; the dataset is fixed by the server, never a tool argument; transactions outside it → "not found" | — |
 | **E**levation: model approves or changes anything | No tool writes data or changes state; `submit_report` only creates a **draft**; approval is a separate human endpoint | — |
 | **T**ampering: invented evidence | Findings must name a transaction a tool returned (others dropped); evidence is copied from the database; policy references must be passage ids a search returned; the server adds a "not a finding of fraud" disclaimer | The free-text summary is not checked sentence by sentence |
-| **T**ampering: hostile strings in report text | The model quotes data (e.g. a merchant named `<tool_result> new instruction…`) as data; the API returns it as JSON strings | Any UI must render report text as plain text, never as HTML |
-| **I**nfo disclosure: "fraud" claims | A report containing "fraud" is sent back once to be rewritten; on the last turn it is accepted with `wording_flag: true` | Wording check is a single keyword |
+| **T**ampering: hostile strings in report text | The model quotes data (e.g. a merchant named `<tool_result> new instruction…`) as data; the API returns it as JSON strings; the web UI renders it as React text (escaped), never as HTML, and makes no links from it | — |
+| **I**nfo disclosure: "fraud" claims | A report containing "fraud" is sent back once to be rewritten; on the last turn it is accepted with `wording_flag: true` (shown as a warning in the UI) | Wording check is a single keyword: a live run wrote "potential money laundering", which it does not catch |
 | **D**oS: runaway loop or cost | 8 model turns, 12 tool calls, 180 s, 700 tokens per call, 2,500 characters per result, repeated calls refused, last turn offers only `submit_report`; 300 s job timeout; 5 investigations / min per user | — |
 | **R**epudiation / audit | `agent_steps`: tool, validated arguments (never raw model output), outcome, error, size and latency per attempt and step; job and report link the trail; no prompts or model text stored | — |
 | **D**oS / duplicates | Idempotency-Key required; an identical unfinished investigation is joined | — |
@@ -102,9 +102,24 @@ Browser ↔ API (HTTP) · API ↔ PostgreSQL / Redis / Qdrant (localhost only) �
 | Threat | Mitigation | Gap |
 | --- | --- | --- |
 | **E**levation: self-promotion | Requires `user:manage` (admin only); roles limited by a DB CHECK constraint | Role changes are not yet written to an audit log |
-| **R**epudiation | Request IDs on every response | Structured audit logging planned |
+| **R**epudiation | Request IDs on every response; the access log records method, route, status and user id per request | Role changes have no dedicated audit table |
 
 ### `/health`, `/ready`
 | Threat | Mitigation | Gap |
 | --- | --- | --- |
 | **I**nfo disclosure | Only `ok`/`down` per dependency; exception details only in server logs | Unauthenticated by design (bind to localhost) |
+
+### Web UI (`frontend/`)
+| Threat | Mitigation | Gap |
+| --- | --- | --- |
+| **T**ampering / **E**levation: XSS through data (merchant names, PDF text, model output) | React escapes all text; no `dangerouslySetInnerHTML`, no Markdown or HTML rendering, no links built from data; the production build sets `Content-Security-Policy: default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'` | The dev server runs without the CSP (React Fast Refresh needs an inline script) |
+| **S**poofing: session theft by script | The session cookie is HttpOnly; the UI never reads or stores it; no tokens in `localStorage` | — |
+| **T**ampering: CSRF | Same-origin requests through the dev proxy; the API's Origin check and SameSite=Lax cookie still apply | — |
+| **E**levation: hidden buttons as security | Buttons for submit/approve are hidden by role and ownership only for convenience; every rule is enforced by the API | — |
+
+### Logs
+| Threat | Mitigation | Gap |
+| --- | --- | --- |
+| **I**nfo disclosure: secrets or user content in logs | Access log has the route *template* (no ids, no query strings), status, duration and internal user id; tests check that passwords and session tokens never appear; model calls log model name, sizes and latency, never prompts | Logs stay on the local machine with no rotation or retention policy |
+| **R**epudiation: tracing an action | Every API line carries `request_id` (also returned as `X-Request-ID`); every worker line during a job carries `job_id` | No central log store |
+

@@ -19,6 +19,8 @@ Runs entirely on your machine: no cloud services, no paid APIs. Uses synthetic a
 | Document Q&A | Questions over your own policy PDFs, answered with page citations; "not enough evidence" when retrieval is weak or citations don't check out; owner-isolated vector search | ✅ Available |
 | Background jobs | Imports, scoring and PDF indexing run in a worker (202 + job status), with retries, time limits, crash recovery and duplicate-request joining; Redis rate limits with `429` + `Retry-After` | ✅ Available |
 | Investigation agent | Drafts an investigation report with a local model using five read-only, allowlisted tools; validated arguments, hard step/time limits, findings checked against tool results, full step audit trail; reports need approval by a second person | ✅ Available |
+| Web UI | Sign-in, CSV import with job progress, filtered transactions and review queue, policy Q&A with citations, investigation reports with submit/approve | ✅ Available |
+| Observability | One JSON log line per request (request id, user id, route template, status, duration) and per job step (job id); no secrets or document text | ✅ Available |
 
 ## Architecture
 
@@ -41,11 +43,13 @@ flowchart LR
 - **Background jobs:** RQ on Redis delivers job ids; the `jobs` table in PostgreSQL is the source of truth, so a lost queue message or a killed worker loses no work. See [ADR-004](docs/decisions/ADR-004-background-jobs.md) and [ADR-007](docs/decisions/ADR-007-rate-limiting.md) (rate limits).
 - **Constrained agent:** a plain-Python tool loop; the model can only read the requesting user's data in one dataset, and it can only draft. See [ADR-012](docs/decisions/ADR-012-investigation-agent.md).
 - **Safe imports:** all-or-nothing CSV imports with required idempotency keys, duplicate-file detection and bulk `COPY`. See [ADR-008](docs/decisions/ADR-008-imports-idempotency.md).
+- **Web client:** a small React + TypeScript app (Vite, Tailwind). The dev server proxies `/api`, so the session cookie stays first-party; the production build ships a strict Content-Security-Policy, and model-written text is only ever rendered as plain text. See [ADR-013](docs/decisions/ADR-013-web-client-and-logging.md).
+- **Structured logs:** JSON lines on stderr from the API and the worker, tied together by `request_id` and `job_id`.
 - **Data stores in Docker:** PostgreSQL 17, Redis 7.4 and Qdrant 1.15 via Docker Compose. The API runs on the host.
 
 ## Quick start
 
-**Requirements:** Docker with Compose, Python 3.11+, [uv](https://docs.astral.sh/uv/), and [Ollama](https://ollama.com) (for AI features).
+**Requirements:** Docker with Compose, Python 3.11+, [uv](https://docs.astral.sh/uv/), Node.js 20.19+ (web UI), and [Ollama](https://ollama.com) (for AI features).
 
 ```bash
 git clone git@github.com:rahul-240505/finsight-ai.git
@@ -62,9 +66,16 @@ uv run alembic upgrade head
 uv run python -m app.cli create-user admin@example.com --role admin
 uv run uvicorn app.main:app --reload
 
-# In a second terminal: the background worker (imports, scoring, PDF indexing)
+# In a second terminal: the background worker (imports, scoring, PDF indexing, investigations)
 uv run python -m app.worker
+
+# In a third terminal: the web UI on http://localhost:5173
+cd frontend
+npm ci
+npm run dev
 ```
+
+Sign in at <http://localhost:5173> with the account you created. A step-by-step demo is in [docs/demo.md](docs/demo.md).
 
 Check it:
 
@@ -74,6 +85,8 @@ curl localhost:8000/ready       # 200 when all data stores respond, else 503
 ```
 
 Interactive API docs: <http://localhost:8000/docs>
+
+Logs are JSON lines on stderr, for example `{"level": "INFO", "logger": "app.access", "method": "GET", "path": "/api/v1/datasets/{dataset_id}", "status": 404, "duration_ms": 9.3, "user_id": "…", "request_id": "…"}`. Set `LOG_JSON=false` for plain text and `LOG_LEVEL=DEBUG` for more detail.
 
 ### API overview
 
@@ -165,13 +178,17 @@ uv run pytest                       # all tests (integration tests need the Comp
                                     # they use a separate <db>_test database)
 uv run pytest -m "not integration"  # unit tests only
 uv run ruff check . && uv run ruff format --check .
+
+cd ../frontend
+npm run build                       # type check + production build
 ```
 
-CI runs lint and the full test suite against real PostgreSQL, Redis and Qdrant service containers on every push.
+CI runs lint and the full test suite against real PostgreSQL, Redis and Qdrant service containers, and type-checks and builds the web UI, on every push.
 
 ## Project layout
 
 ```
+frontend/       React + TypeScript web UI (Vite, Tailwind)
 backend/        FastAPI app (app/, worker in app/worker/), Alembic migrations (alembic/) and tests (tests/)
 infra/local/    Docker Compose for the data stores
 ml/             Model training (training/) and experiments (experiments/); artifacts are git-ignored
@@ -186,7 +203,8 @@ All numbers come from [docs/evaluation.md](docs/evaluation.md) and were measured
 
 | Measurement | Result |
 | --- | --- |
-| Test suite | 188 passed (unit + integration against PostgreSQL, Redis and Qdrant), median 23.8 s |
+| Test suite | 193 passed (unit + integration against PostgreSQL, Redis and Qdrant), median 25.1 s |
+| Web UI walkthrough, real stack (single run) | Policy answer with a page citation in 3.6 s; off-topic question → "not enough evidence" in 30 ms with no model call; investigation → draft with 3 grounded findings in 36 s; 500k-row transaction page 7 ms server time |
 | Anomaly scoring, test month (synthetic, labelled injections) | PR-AUC 0.658 [95% CI 0.614-0.700] vs 0.202 best single rule, 0.011 random; precision 0.71, recall 0.55 |
 | Supervised fraud model, public card dataset (75 test frauds) | Logistic regression PR-AUC 0.744 [0.630-0.852]; gradient boosting 0.753, difference not significant |
 | Scoring 500k transactions | Accepted in 0.04 s median; job 22.5-24.1 s after VACUUM (30.9 s median with dead rows from repeated re-scoring) |
@@ -212,4 +230,4 @@ All numbers come from [docs/evaluation.md](docs/evaluation.md) and were measured
 - [x] Document Q&A with citations
 - [x] Background jobs and rate limiting
 - [x] Investigation agent with human approval
-- [ ] Web UI, structured logging, threat model
+- [x] Web UI, structured logging, threat model

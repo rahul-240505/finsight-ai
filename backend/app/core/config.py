@@ -39,6 +39,10 @@ class Settings(BaseSettings):
     # Auth (ADR-005): opaque session token in an HttpOnly, Secure, SameSite=Lax cookie.
     session_cookie_name: str = "finsight_session"
     session_ttl_hours: int = Field(default=12, gt=0, le=24 * 30)
+    # Logging: JSON lines on stderr (set LOG_JSON=false for plain text while debugging).
+    log_level: str = "INFO"
+    log_json: bool = True
+
     # Browser origins allowed to send state-changing requests (CSRF Origin check).
     allowed_origins: list[str] = ["http://localhost:5173"]
 

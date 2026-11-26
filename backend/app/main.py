@@ -4,13 +4,15 @@ from fastapi import APIRouter, FastAPI
 
 from app.api import health
 from app.api.v1 import answers, auth, datasets, documents, jobs, reports, risk, transactions, users
+from app.core.config import get_settings
 from app.core.errors import install_error_handlers
+from app.core.logs import configure_logging
 from app.core.middleware import install_middleware
 
 
 def create_app() -> FastAPI:
     """Build a fresh app; tests call this to get an isolated instance with their own overrides."""
-    app = FastAPI(title="FinSight AI", version="0.7.0")
+    app = FastAPI(title="FinSight AI", version="0.8.0")
     install_error_handlers(app)
     install_middleware(app)
 
@@ -22,4 +24,6 @@ def create_app() -> FastAPI:
     return app
 
 
+settings = get_settings()
+configure_logging(settings.log_level, settings.log_json)
 app = create_app()

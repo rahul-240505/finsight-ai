@@ -11,16 +11,18 @@ import redis
 from rq import Worker
 
 from app.core.config import get_settings
+from app.core.logs import configure_logging
 from app.db.session import get_engine
 from app.modules.jobs import runner
 from app.worker.sweep import requeue_lost
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+logger = logging.getLogger("app.worker")
 
 
 def main() -> None:
     settings = get_settings()
-    print(f"re-delivered {requeue_lost(older_than_seconds=60)} lost job(s)")
+    configure_logging(settings.log_level, settings.log_json)
+    logger.info("worker starting", extra={"redelivered": requeue_lost(older_than_seconds=60)})
     # The sweep opened database connections in this (parent) process. Each job runs in a
     # forked child; children must not share the parent's sockets, so empty the pool here and
     # let every child open its own connections.

@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.errors import AppError
+from app.core.logs import job_id_var
 from app.db.models import Job, User
 from app.db.session import get_sessionmaker
 from app.modules.jobs import service as jobs
@@ -83,6 +84,7 @@ def run_job(job_id: uuid.UUID, db: Session | None = None, deps: Deps | None = No
     """Returns the job's status afterwards, or "skipped" if another worker owns it."""
     own_session = db is None
     db = db or get_sessionmaker()()
+    token = job_id_var.set(str(job_id))
     try:
         job = jobs.claim(db, job_id)
         if job is None:
@@ -114,5 +116,6 @@ def run_job(job_id: uuid.UUID, db: Session | None = None, deps: Deps | None = No
         logger.info("job %s kind=%s finished status=%s", job_id, job.kind, job.status)
         return job.status
     finally:
+        job_id_var.reset(token)
         if own_session:
             db.close()

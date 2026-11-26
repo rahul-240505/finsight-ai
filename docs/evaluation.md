@@ -267,3 +267,31 @@ Every benchmark and evaluation result for FinSight AI, with the exact command an
 ### 2026-11-26 · Test suite after investigation-agent milestone
 - Version: 0.7.0 · Command: `cd backend && uv run pytest` (3 runs, Ollama running)
 - Result: 188 passed, 0 failed, 0 skipped. Wall time 25.90 / 23.81 / 23.67 s (median 23.81 s).
+
+### 2026-11-27 · Web UI walkthrough on the real stack
+- Version: 0.8.0 · Machine: i5-12500H, RTX 4050 6 GB, 15 GiB · Data stores: local Docker
+- Setup: API (`uvicorn`), worker, Vite dev server; headless Chrome driven by a script; demo user with the 500k synthetic dataset (scored), one fictional policy PDF uploaded through the UI
+- Result (single runs; observations, not benchmarks):
+
+| Step | Result |
+| --- | --- |
+| Wrong password | Error shown with request id; correct password → signed in |
+| Transactions page, 500k rows | `GET /transactions` 7.2 ms server time for the next page; summary over all rows 390 ms |
+| Flagged review queue | 50 rows, highest risk first, with reasons |
+| PDF upload → indexed | Job finished in 0.75 s (6 chunks embedded) |
+| Policy question with an answer | 3.6 s in the browser, answer cites `transaction-monitoring-policy.pdf` page 2 |
+| Off-topic question | "Not enough evidence" in 30 ms server time, no model call |
+| Investigation ("bursts of many quick transactions") | Job 36.4 s; draft with 3 findings (all flagged transactions), 1 policy reference, 7 tool calls, 8 audit steps all `ok`; submitted from the UI |
+| Peak temperatures during the run | GPU 73 °C, CPU 83 °C |
+| Browser errors | None besides expected 401s before sign-in |
+
+- Notes: approval was not exercised in this walkthrough (it needs a second, admin account); the four-eyes rule is covered by the test suite. The draft's recommendation used the phrase "potential money laundering", which the "fraud" wording rule does not catch (see threat model).
+
+### 2026-11-27 · Web UI production build
+- Command: `cd frontend && npm run build` (Vite 8.3.8, React 19.3.1, Tailwind 4.3.5)
+- Result: JavaScript 249.7 kB (76.6 kB gzip), CSS 18.2 kB (4.7 kB gzip); type check clean. Loads under its Content-Security-Policy with no violations.
+
+### 2026-11-27 · Test suite after web UI and logging milestone
+- Version: 0.8.0 · Command: `cd backend && uv run pytest` (3 runs)
+- Result: 193 passed, 0 failed, 0 skipped. Wall time 29.24 / 25.13 / 24.80 s (median 25.13 s). New: JSON formatter, access log per request (route template, status, user id, request id), no password or session token in logs, job id on worker lines.
+

@@ -22,6 +22,7 @@ def get_current_user(request: Request, db: DbSession) -> User:
     user = auth_service.user_for_token(db, token) if token else None
     if user is None:
         raise Unauthorized()
+    request.state.user_id = user.id  # for the access log
     return user
 
 
